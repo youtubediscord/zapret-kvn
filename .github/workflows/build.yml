@@ -132,8 +132,8 @@ jobs:
         run: |
           cd dist/ZapretKVN
 
-          7z a -tzip -mx=9 -mfb=258 -mpass=15 "../ZapretKVN-v$env:VERSION-windows-x64.zip" *
-          7z a -t7z -mx=9 -mfb=273 -ms=on -md=64m -mmt=on "../ZapretKVN-v$env:VERSION-windows-x64.7z" *
+          7z a -tzip -mx=5 "../ZapretKVN-v$env:VERSION-windows-x64.zip" *
+          7z a -t7z -mx=5 "../ZapretKVN-v$env:VERSION-windows-x64.7z" *
 
           cd ..
           Write-Host "Release archives:"

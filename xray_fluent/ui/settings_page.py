@@ -114,9 +114,7 @@ class SettingsPage(QWidget):
     set_password_requested = pyqtSignal(str)
     disable_password_requested = pyqtSignal()
     lock_now_requested = pyqtSignal()
-    check_updates_requested = pyqtSignal()
-    check_xray_updates_requested = pyqtSignal()
-    update_xray_requested = pyqtSignal()
+    # Update buttons moved to UpdatesPage
     export_backup_requested = pyqtSignal()
     import_backup_requested = pyqtSignal()
     set_encryption_requested = pyqtSignal(str)
@@ -248,16 +246,6 @@ class SettingsPage(QWidget):
         # ============================================================
         updates_group = SettingCardGroup("Updates", container)
 
-        self.channel_card = _ComboCard(
-            FIF.UPDATE, "App update channel", "Release channel for application updates",
-            [("Stable", "stable"), ("Beta", "beta"), ("Nightly", "nightly")],
-            parent=updates_group,
-        )
-        self.feed_card = _LineEditCard(
-            FIF.LINK, "App feed URL", "Custom update feed URL",
-            placeholder="https://example.com/releases.json",
-            parent=updates_group,
-        )
         self.check_updates_card = SwitchSettingCard(
             FIF.UPDATE, "Check app updates",
             "Periodically check for new app versions on startup",
@@ -268,47 +256,15 @@ class SettingsPage(QWidget):
             "Enable downloading and installing app updates",
             parent=updates_group,
         )
-        self.xray_channel_card = _ComboCard(
-            FIF.DEVELOPER_TOOLS, "Xray core channel", "Release channel for Xray core updates",
-            [("Stable", "stable"), ("Beta", "beta"), ("Nightly", "nightly")],
-            parent=updates_group,
-        )
-        self.xray_feed_card = _LineEditCard(
-            FIF.LINK, "Xray feed URL", "Leave empty to use official GitHub releases",
-            placeholder="Leave empty for official releases",
-            parent=updates_group,
-        )
         self.xray_auto_update_card = SwitchSettingCard(
             FIF.CLOUD_DOWNLOAD, "Auto update Xray core",
             "Automatically update Xray core binary on startup",
             parent=updates_group,
         )
-        self.check_app_card = PushSettingCard(
-            "Check now", FIF.SEARCH, "Check app updates",
-            "Check for new application versions right now",
-            parent=updates_group,
-        )
-        self.check_xray_card = PushSettingCard(
-            "Check now", FIF.DEVELOPER_TOOLS, "Check Xray core updates",
-            "Check for Xray core updates right now",
-            parent=updates_group,
-        )
-        self.update_xray_card = PrimaryPushSettingCard(
-            "Update now", FIF.DOWNLOAD, "Update Xray core",
-            "Download and install the latest Xray core",
-            parent=updates_group,
-        )
 
-        updates_group.addSettingCard(self.channel_card)
-        updates_group.addSettingCard(self.feed_card)
         updates_group.addSettingCard(self.check_updates_card)
         updates_group.addSettingCard(self.allow_updates_card)
-        updates_group.addSettingCard(self.xray_channel_card)
-        updates_group.addSettingCard(self.xray_feed_card)
         updates_group.addSettingCard(self.xray_auto_update_card)
-        updates_group.addSettingCard(self.check_app_card)
-        updates_group.addSettingCard(self.check_xray_card)
-        updates_group.addSettingCard(self.update_xray_card)
         root.addWidget(updates_group)
 
         # ============================================================
@@ -383,19 +339,13 @@ class SettingsPage(QWidget):
         self.import_backup_card.clicked.connect(self.import_backup_requested)
 
         # Update action buttons
-        self.check_app_card.clicked.connect(self.check_updates_requested)
-        self.check_xray_card.clicked.connect(self.check_xray_updates_requested)
-        self.update_xray_card.clicked.connect(self.update_xray_requested)
+        # Update buttons moved to UpdatesPage
 
         # --- Auto-save connections ---
         self.theme_card.combo.currentIndexChanged.connect(self._auto_save)
         self.accent_card.picker.colorChanged.connect(self._auto_save)
         self.socks_card.spin.valueChanged.connect(self._auto_save)
         self.http_card.spin.valueChanged.connect(self._auto_save)
-        self.channel_card.combo.currentIndexChanged.connect(self._auto_save)
-        self.xray_channel_card.combo.currentIndexChanged.connect(self._auto_save)
-        self.feed_card.edit.editingFinished.connect(self._auto_save)
-        self.xray_feed_card.edit.editingFinished.connect(self._auto_save)
         self.xray_path_card.edit.editingFinished.connect(self._auto_save)
         self.singbox_path_card.edit.editingFinished.connect(self._auto_save)
 
@@ -441,10 +391,6 @@ class SettingsPage(QWidget):
         )
         self.tun_card.setChecked(settings.tun_mode)
         self.proxy_card.setEnabled(not settings.tun_mode)
-        self._select_combo_data(self.channel_card.combo, settings.release_channel)
-        self.feed_card.edit.setText(settings.update_feed_url)
-        self._select_combo_data(self.xray_channel_card.combo, settings.xray_release_channel)
-        self.xray_feed_card.edit.setText(settings.xray_update_feed_url)
 
         self.start_min_card.setChecked(settings.start_minimized)
         self.proxy_card.setChecked(settings.enable_system_proxy)
@@ -538,10 +484,6 @@ class SettingsPage(QWidget):
         self.xray_path_card.edit.setText(data.xray_path)
         self.singbox_path_card.edit.setText(data.singbox_path)
         data.tun_mode = self.tun_card.isChecked()
-        data.release_channel = str(self.channel_card.combo.currentData() or "stable")
-        data.update_feed_url = self.feed_card.edit.text().strip()
-        data.xray_release_channel = str(self.xray_channel_card.combo.currentData() or "stable")
-        data.xray_update_feed_url = self.xray_feed_card.edit.text().strip()
         data.start_minimized = self.start_min_card.isChecked()
         data.enable_system_proxy = self.proxy_card.isChecked()
         data.launch_on_startup = self.launch_card.isChecked()

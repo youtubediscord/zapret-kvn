@@ -16,9 +16,9 @@ from qfluentwidgets import (
 
 from ..app_controller import AppController
 from ..storage import PassphraseRequired
-from ..constants import APP_NAME
+from ..constants import APP_NAME, APP_VERSION
 from ..models import AppSettings, Node, RoutingSettings
-from ..update_checker import check_update
+from ..app_updater import AppUpdate, UpdateChecker, UpdateDownloader
 from ..xray_core_updater import XrayCoreUpdateResult
 from .bulk_edit_dialog import BulkEditDialog
 from .dashboard_page import DashboardPage
@@ -28,6 +28,7 @@ from .node_edit_dialog import NodeEditDialog
 from .nodes_page import NodesPage
 from .routing_page import RoutingPage
 from .settings_page import SettingsPage
+from .updates_page import UpdatesPage
 
 
 class MainWindow(FluentWindow):
@@ -56,6 +57,7 @@ class MainWindow(FluentWindow):
         self.routing_page = RoutingPage(self)
         self.logs_page = LogsPage(self)
         self.settings_page = SettingsPage(self)
+        self.updates_page = UpdatesPage(self)
 
         self._create_navigation()
         self._create_tray()
@@ -72,6 +74,11 @@ class MainWindow(FluentWindow):
         if loaded and unlocked:
             self.controller.auto_connect_if_needed()
 
+        # Set Xray version on updates page
+        from ..xray_manager import get_xray_version
+        xv = get_xray_version(self.controller.state.settings.xray_path)
+        self.updates_page.set_xray_version(xv or "")
+
         if self.controller.state.settings.check_updates:
             QTimer.singleShot(2500, lambda: self._check_updates(silent=True))
 
@@ -85,6 +92,7 @@ class MainWindow(FluentWindow):
         self.addSubInterface(self.nodes_page, FIF.LINK, "Nodes")
         self.addSubInterface(self.routing_page, FIF.GLOBE, "Routing")
         self.addSubInterface(self.logs_page, FIF.DOCUMENT, "Logs")
+        self.addSubInterface(self.updates_page, FIF.UPDATE, "Updates", NavigationItemPosition.BOTTOM)
         self.addSubInterface(self.settings_page, FIF.SETTING, "Settings", NavigationItemPosition.BOTTOM)
 
     def _create_tray(self) -> None:
@@ -166,9 +174,9 @@ class MainWindow(FluentWindow):
         self.settings_page.set_password_requested.connect(self._set_password)
         self.settings_page.disable_password_requested.connect(self.controller.disable_master_password)
         self.settings_page.lock_now_requested.connect(self.controller.lock)
-        self.settings_page.check_updates_requested.connect(self._check_updates)
-        self.settings_page.check_xray_updates_requested.connect(lambda: self.controller.run_xray_core_update(False, silent=False))
-        self.settings_page.update_xray_requested.connect(lambda: self.controller.run_xray_core_update(True, silent=False))
+        self.updates_page.check_app_requested.connect(self._check_updates)
+        self.updates_page.check_xray_requested.connect(lambda: self.controller.run_xray_core_update(False, silent=False))
+        self.updates_page.update_xray_requested.connect(lambda: self.controller.run_xray_core_update(True, silent=False))
         self.settings_page.export_backup_requested.connect(self._export_backup)
         self.settings_page.import_backup_requested.connect(self._import_backup)
         self.settings_page.set_encryption_requested.connect(self._set_encryption)
@@ -372,29 +380,57 @@ class MainWindow(FluentWindow):
         self._show_status("success", f"Diagnostics exported: {path}")
 
     def _check_updates(self, silent: bool = False) -> None:
-        settings = self.controller.state.settings
-        if not settings.allow_updates:
+        self._pending_update: AppUpdate | None = None
+        self._update_checker = UpdateChecker(parent=self)
+        self._update_checker.result.connect(lambda u: self._on_update_check_result(u, silent))
+        self._update_checker.start()
+        if not silent:
+            self.updates_page.show_checking()
+
+    def _on_update_check_result(self, update: AppUpdate | None, silent: bool) -> None:
+        if update is None:
+            self.updates_page.show_up_to_date()
             if not silent:
-                self._show_status("info", "Updates disabled in settings")
-            return
-        if not settings.update_feed_url:
-            if not silent:
-                self._show_status("warning", "Update feed URL is empty")
+                self._show_status("info", "You are on the latest version")
             return
 
-        try:
-            info = check_update(settings.update_feed_url, channel=settings.release_channel)
-        except Exception as exc:
-            if not silent:
-                self._show_status("error", f"Update check failed: {exc}")
-            else:
-                self.logs_page.append_line(f"[update] check failed: {exc}")
-            return
+        self._pending_update = update
+        self.updates_page.show_update_available(update.version)
+        self.updates_page.download_btn.clicked.connect(
+            lambda: self._start_update_download(self._pending_update)
+        )
 
-        if info:
-            self._show_status("success", f"Latest {info.channel}: {info.version}")
-        elif not silent:
-            self._show_status("info", "No update info available")
+        # Blocking dialog
+        from qfluentwidgets import MessageBox
+        box = MessageBox(
+            "Update available",
+            f"New version v{update.version} is available.\n"
+            f"Current: v{APP_VERSION}\n\n"
+            f"The app will download, close, and restart automatically.",
+            self,
+        )
+        box.yesButton.setText("Download && Install")
+        box.cancelButton.setText("Later")
+        if box.exec():
+            self._start_update_download(update)
+
+    def _start_update_download(self, update: AppUpdate) -> None:
+        self.updates_page.show_download_progress(0)
+        self._update_downloader = UpdateDownloader(update, parent=self)
+        self._update_downloader.progress.connect(self.updates_page.show_download_progress)
+        self._update_downloader.finished_ok.connect(self._on_update_ready)
+        self._update_downloader.error.connect(self._on_update_error)
+        self._update_downloader.start()
+
+    def _on_update_ready(self) -> None:
+        self.updates_page.set_app_status("Update downloaded. Restarting...")
+        self._show_status("success", "Update downloaded. Restarting...")
+        QTimer.singleShot(1500, lambda: QApplication.quit())
+
+    def _on_update_error(self, err: str) -> None:
+        self.updates_page.show_idle()
+        self.updates_page.set_app_status(f"Update failed: {err}")
+        self._show_status("error", f"Update failed: {err}")
 
     def _apply_theme(self, theme_name: str, accent_color: str) -> None:
         normalized = theme_name.lower().strip()
