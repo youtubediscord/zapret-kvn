@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.request
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
