@@ -2,10 +2,9 @@ name: Build & Release
 
 on:
   push:
-    branches: [master, main]
-    tags: ["v*"]
+    branches: [main]
   pull_request:
-    branches: [master, main]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -16,6 +15,36 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine version
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $tags = git tag --list "v*" --sort=-version:refname 2>$null
+          if ($tags) {
+            $latest = ($tags | Select-Object -First 1).Trim()
+            $parts = $latest.TrimStart("v").Split(".")
+            $major = [int]$parts[0]
+            $minor = [int]$parts[1]
+            $patch = [int]$parts[2] + 1
+            $version = "$major.$minor.$patch"
+          } else {
+            $version = "0.4.0"
+          }
+          echo "VERSION=$version" >> $env:GITHUB_ENV
+          echo "RELEASE_TAG=v$version" >> $env:GITHUB_ENV
+          Write-Host "Release version: $version (tag: v$version)"
+
+      - name: Update version in constants.py
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $file = "xray_fluent/constants.py"
+          (Get-Content $file -Raw) -replace 'APP_VERSION = ".*?"', "APP_VERSION = `"$env:VERSION`"" | Set-Content $file -NoNewline
+          Write-Host "Updated APP_VERSION to $env:VERSION"
+          Get-Content $file | Select-String "APP_VERSION"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -82,7 +111,6 @@ jobs:
             --hidden-import win32comext.shell `
             --hidden-import win32comext.shell.shellcon
 
-          # Copy core/ into dist
           Copy-Item -Recurse core dist/ZapretKVN/core
 
           Write-Host "Build complete:"
@@ -94,31 +122,37 @@ jobs:
           name: ZapretKVN-portable
           path: dist/ZapretKVN/
 
-      # ── Release (only on tag push v*) ──
+      # ── Release on every push to main ──
 
       - name: Create release archives
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}"
           cd dist/ZapretKVN
 
-          # ZIP
-          Compress-Archive -Path * -DestinationPath "../ZapretKVN-${version}-windows-x64.zip"
-
-          # 7z
-          7z a "../ZapretKVN-${version}-windows-x64.7z" * -mx9
+          Compress-Archive -Path * -DestinationPath "../ZapretKVN-v$env:VERSION-windows-x64.zip"
+          7z a "../ZapretKVN-v$env:VERSION-windows-x64.7z" * -mx9
 
           cd ..
           Write-Host "Release archives:"
           Get-ChildItem *.zip, *.7z | Format-Table Name, Length
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
-          name: "zapret kvn ${{ github.ref_name }}"
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "zapret kvn ${{ env.RELEASE_TAG }}"
           generate_release_notes: true
+          make_latest: true
           files: |
             dist/ZapretKVN-*-windows-x64.zip
             dist/ZapretKVN-*-windows-x64.7z
+
+      - name: Commit version bump
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add xray_fluent/constants.py
+          git diff --cached --quiet || git commit -m "v${{ env.VERSION }} [skip ci]" && git push
