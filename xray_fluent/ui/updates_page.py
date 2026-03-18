@@ -131,6 +131,8 @@ class UpdatesPage(QWidget):
         self._app_progress.show()
         self._app_progress.setValue(percent)
         self._app_status.setText(f"Downloading: {percent}%")
+        self.check_app_btn.setEnabled(False)
+        self.download_btn.setEnabled(False)
 
     def show_idle(self) -> None:
         self._app_spinner.stop()

@@ -380,14 +380,26 @@ class MainWindow(FluentWindow):
         self._show_status("success", f"Diagnostics exported: {path}")
 
     def _check_updates(self, silent: bool = False) -> None:
+        if getattr(self, "_update_in_progress", False):
+            return
+        self._update_in_progress = True
         self._pending_update: AppUpdate | None = None
         self._update_checker = UpdateChecker(parent=self)
         self._update_checker.result.connect(lambda u: self._on_update_check_result(u, silent))
+        self._update_checker.error.connect(lambda e: self._on_update_check_error(e, silent))
         self._update_checker.start()
         if not silent:
             self.updates_page.show_checking()
 
+    def _on_update_check_error(self, err: str, silent: bool) -> None:
+        self._update_in_progress = False
+        if not silent:
+            self.updates_page.show_idle()
+            self.updates_page.set_app_status(f"Check failed: {err}")
+            self._show_status("error", f"Update check failed: {err}")
+
     def _on_update_check_result(self, update: AppUpdate | None, silent: bool) -> None:
+        self._update_in_progress = False
         if update is None:
             self.updates_page.show_up_to_date()
             if not silent:
@@ -396,11 +408,17 @@ class MainWindow(FluentWindow):
 
         self._pending_update = update
         self.updates_page.show_update_available(update.version)
+        try:
+            self.updates_page.download_btn.clicked.disconnect()
+        except TypeError:
+            pass
         self.updates_page.download_btn.clicked.connect(
             lambda: self._start_update_download(self._pending_update)
         )
 
-        # Blocking dialog
+        # Switch to Updates page and show dialog
+        self.switchTo(self.updates_page)
+
         from qfluentwidgets import MessageBox
         box = MessageBox(
             "Update available",
@@ -415,8 +433,18 @@ class MainWindow(FluentWindow):
             self._start_update_download(update)
 
     def _start_update_download(self, update: AppUpdate) -> None:
+        self._update_in_progress = True
+        self.switchTo(self.updates_page)
         self.updates_page.show_download_progress(0)
-        self._update_downloader = UpdateDownloader(update, parent=self)
+
+        # Use proxy if connected
+        proxy_url = None
+        if self.controller.connected:
+            from ..constants import PROXY_HOST, DEFAULT_HTTP_PORT
+            port = self.controller.state.settings.http_port or DEFAULT_HTTP_PORT
+            proxy_url = f"http://{PROXY_HOST}:{port}"
+
+        self._update_downloader = UpdateDownloader(update, proxy_url=proxy_url, parent=self)
         self._update_downloader.progress.connect(self.updates_page.show_download_progress)
         self._update_downloader.finished_ok.connect(self._on_update_ready)
         self._update_downloader.error.connect(self._on_update_error)

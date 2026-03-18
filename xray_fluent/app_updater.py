@@ -40,11 +40,12 @@ class UpdateChecker(QThread):
     """Check GitHub for a newer release."""
 
     result = pyqtSignal(object)  # AppUpdate | None
+    error = pyqtSignal(str)
 
     def run(self) -> None:
         try:
             req = Request(GITHUB_API, headers={"User-Agent": USER_AGENT})
-            with urlopen(req, timeout=10) as resp:
+            with urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read())
 
             tag = data.get("tag_name", "")
@@ -63,6 +64,7 @@ class UpdateChecker(QThread):
                     break
 
             if not asset:
+                self.error.emit(f"Release {tag} found but no Windows zip asset")
                 self.result.emit(None)
                 return
 
@@ -73,7 +75,8 @@ class UpdateChecker(QThread):
                 size=asset.get("size", 0),
                 notes=data.get("body", ""),
             ))
-        except Exception:
+        except Exception as exc:
+            self.error.emit(str(exc))
             self.result.emit(None)
 
 
@@ -84,18 +87,24 @@ class UpdateDownloader(QThread):
     finished_ok = pyqtSignal()
     error = pyqtSignal(str)
 
-    def __init__(self, update: AppUpdate, parent=None):
+    def __init__(self, update: AppUpdate, proxy_url: str | None = None, parent=None):
         super().__init__(parent)
         self._update = update
+        self._proxy_url = proxy_url
 
     def run(self) -> None:
         try:
             tmp_dir = Path(tempfile.mkdtemp(prefix="zapretkvn_update_"))
             zip_path = tmp_dir / "update.zip"
 
-            # Download
+            # Download (use proxy if available)
             req = Request(self._update.download_url, headers={"User-Agent": USER_AGENT})
-            with urlopen(req, timeout=120) as resp:
+            if self._proxy_url:
+                handler = urllib.request.ProxyHandler({"http": self._proxy_url, "https": self._proxy_url})
+                opener = urllib.request.build_opener(handler)
+            else:
+                opener = urllib.request.build_opener()
+            with opener.open(req, timeout=120) as resp:
                 total = int(resp.headers.get("Content-Length", 0))
                 downloaded = 0
                 with open(zip_path, "wb") as f:
