@@ -25,7 +25,9 @@ jobs:
           $tags = git tag --list "v*" --sort=-version:refname 2>$null
           if ($tags) {
             $latest = ($tags | Select-Object -First 1).Trim()
-            $parts = $latest.TrimStart("v").Split(".")
+            # Strip "v" prefix and any suffix like "-beta"
+            $clean = ($latest.TrimStart("v") -replace '-.*$','')
+            $parts = $clean.Split(".")
             $major = [int]$parts[0]
             $minor = [int]$parts[1]
             $patch = [int]$parts[2] + 1
@@ -130,8 +132,8 @@ jobs:
         run: |
           cd dist/ZapretKVN
 
-          Compress-Archive -Path * -DestinationPath "../ZapretKVN-v$env:VERSION-windows-x64.zip"
-          7z a "../ZapretKVN-v$env:VERSION-windows-x64.7z" * -mx9
+          7z a -tzip -mx=9 -mfb=258 -mpass=15 "../ZapretKVN-v$env:VERSION-windows-x64.zip" *
+          7z a -t7z -mx=9 -mfb=273 -ms=on -md=64m -mmt=on "../ZapretKVN-v$env:VERSION-windows-x64.7z" *
 
           cd ..
           Write-Host "Release archives:"
