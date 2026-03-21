@@ -168,8 +168,8 @@ class MainWindow(FluentWindow):
 
         self.zapret_page.start_requested.connect(self._on_zapret_start)
         self.zapret_page.stop_requested.connect(self._on_zapret_stop)
-        self.controller.zapret.started.connect(lambda: self.zapret_page.set_running(True))
-        self.controller.zapret.stopped.connect(lambda: self.zapret_page.set_running(False))
+        self.controller.zapret.started.connect(self._on_zapret_started)
+        self.controller.zapret.stopped.connect(self._on_zapret_stopped)
         self.controller.zapret.error.connect(self._on_zapret_error)
         self.controller.zapret.log_line.connect(self.logs_page.append_line)
 
@@ -421,24 +421,27 @@ class MainWindow(FluentWindow):
 
     def _init_zapret_page(self) -> None:
         from ..zapret_manager import ZapretManager
-        presets = ZapretManager.list_presets()
+        infos = ZapretManager.list_preset_infos()
         saved = self.controller.state.settings.zapret_preset
-        self.zapret_page.set_presets(presets, saved)
-        if self.controller.state.settings.zapret_autostart and saved and saved in presets:
-            QTimer.singleShot(1000, lambda: self._on_zapret_start(saved))
+        self.zapret_page.set_presets(infos, saved)
+        if self.controller.state.settings.zapret_autostart and saved:
+            if any(p.name == saved for p in infos):
+                QTimer.singleShot(1000, lambda: self._on_zapret_start(saved))
 
     def _on_zapret_start(self, preset_name: str) -> None:
-        if preset_name == "__refresh__":
-            from ..zapret_manager import ZapretManager
-            presets = ZapretManager.list_presets()
-            self.zapret_page.set_presets(presets, self.controller.state.settings.zapret_preset)
-            return
         self.controller.state.settings.zapret_preset = preset_name
         self.controller.save()
         self.controller.zapret.start(preset_name)
 
     def _on_zapret_stop(self) -> None:
         self.controller.zapret.stop()
+
+    def _on_zapret_started(self) -> None:
+        active = self.controller.state.settings.zapret_preset
+        self.zapret_page.set_running(True, active)
+
+    def _on_zapret_stopped(self) -> None:
+        self.zapret_page.set_running(False)
 
     def _on_zapret_error(self, message: str) -> None:
         self.zapret_page.set_error(message)
