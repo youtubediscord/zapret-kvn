@@ -36,6 +36,7 @@ class Node:
     is_alive: bool | None = None
     ping_history: list[tuple[str, int | None]] = field(default_factory=list)
     speed_history: list[tuple[str, float | None]] = field(default_factory=list)
+    sort_order: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -56,6 +57,7 @@ class Node:
             "is_alive": self.is_alive,
             "ping_history": self.ping_history,
             "speed_history": self.speed_history,
+            "sort_order": self.sort_order,
         }
 
     @staticmethod
@@ -78,6 +80,7 @@ class Node:
             is_alive=data.get("is_alive"),
             ping_history=data.get("ping_history", []),
             speed_history=data.get("speed_history", []),
+            sort_order=int(data.get("sort_order", 0)),
         )
 
 
@@ -89,6 +92,8 @@ class RoutingSettings:
     proxy_domains: list[str] = field(default_factory=list)
     block_domains: list[str] = field(default_factory=list)
     dns_mode: str = "system"  # system | builtin
+    process_rules: list[dict[str, str]] = field(default_factory=list)  # [{"process": "chrome.exe", "action": "direct|proxy|block"}]
+    service_routes: dict[str, str] = field(default_factory=dict)  # {"youtube": "proxy", "steam": "direct", ...}
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -98,6 +103,8 @@ class RoutingSettings:
             "proxy_domains": list(self.proxy_domains),
             "block_domains": list(self.block_domains),
             "dns_mode": self.dns_mode,
+            "process_rules": list(self.process_rules),
+            "service_routes": dict(self.service_routes),
         }
 
     @staticmethod
@@ -109,6 +116,8 @@ class RoutingSettings:
             proxy_domains=list(data.get("proxy_domains") or []),
             block_domains=list(data.get("block_domains") or []),
             dns_mode=str(data.get("dns_mode") or "system"),
+            process_rules=list(data.get("process_rules") or []),
+            service_routes=dict(data.get("service_routes") or {}),
         )
 
 

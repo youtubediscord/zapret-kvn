@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PyQt6.QtWidgets import QDialog, QHBoxLayout, QVBoxLayout
-from qfluentwidgets import BodyLabel, EditableComboBox, LineEdit, PrimaryPushButton, PushButton, SubtitleLabel
+from qfluentwidgets import BodyLabel, EditableComboBox, LineEdit, PrimaryPushButton, PushButton, SubtitleLabel, isDarkTheme
 
 from ..models import Node
 
@@ -12,6 +12,8 @@ class NodeEditDialog(QDialog):
         self.setWindowTitle("Редактирование сервера")
         self.setModal(True)
         self.setMinimumWidth(420)
+        bg = "#2b2b2b" if isDarkTheme() else "#f3f3f3"
+        self.setStyleSheet(f"NodeEditDialog {{ background-color: {bg}; }}")
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 20, 20, 20)

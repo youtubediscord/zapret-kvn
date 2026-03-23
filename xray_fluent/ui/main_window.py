@@ -157,6 +157,7 @@ class MainWindow(FluentWindow):
 
         self.nodes_page.import_clipboard_requested.connect(self._import_nodes_from_clipboard)
         self.nodes_page.delete_requested.connect(self.controller.remove_nodes)
+        self.nodes_page.reorder_requested.connect(self.controller.reorder_nodes)
         self.nodes_page.selected_node_changed.connect(self.controller.set_selected_node)
         self.nodes_page.ping_requested.connect(self._ping_requested)
         self.nodes_page.export_outbound_json_requested.connect(self._export_outbound_json)
@@ -253,6 +254,7 @@ class MainWindow(FluentWindow):
         self.settings_page.set_values(settings, self.controller.state.security)
         self.settings_page.set_encryption_active(self.controller.is_data_encrypted())
         self.dashboard_page.set_settings_snapshot(settings)
+        self.routing_page.set_tun_mode(settings.tun_mode)
         self._apply_theme(settings.theme, settings.accent_color)
 
     def _on_ping_updated(self, node_id: str, ping_ms: int | None) -> None:
@@ -389,15 +391,10 @@ class MainWindow(FluentWindow):
         self.controller.update_settings(settings)
 
     def _set_mode_only(self, mode: str) -> None:
-        routing = self.controller.state.routing
-        self.controller.update_routing(
-            mode,
-            routing.direct_domains,
-            routing.proxy_domains,
-            routing.block_domains,
-            routing.bypass_lan,
-            routing.dns_mode,
-        )
+        from copy import deepcopy
+        routing = deepcopy(self.controller.state.routing)
+        routing.mode = mode
+        self.controller.update_routing(routing)
 
     def _set_mode_from_tray(self, mode: str) -> None:
         self._set_mode_only(mode)

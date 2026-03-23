@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -44,6 +45,8 @@ class ZapretManager(QObject):
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
         self._process: QProcess | None = None
+        self._current_preset: str = ""
+        self._start_args: list[str] = []
         self._health_timer = QTimer(self)
         self._health_timer.setInterval(3000)
         self._health_timer.timeout.connect(self._check_health)
@@ -223,6 +226,10 @@ class ZapretManager(QObject):
         if self.running:
             self.stop()
 
+        killed = self._kill_orphaned()
+        for name in killed:
+            self.log_line.emit(f"[zapret] Завершён сторонний процесс: {name}")
+
         exe = WINWS2_EXE
         if not exe.exists():
             self.error.emit(f"winws2.exe не найден: {exe}")
@@ -238,6 +245,9 @@ class ZapretManager(QObject):
         if not args:
             self.error.emit(f"Пресет пустой: {preset_name}")
             return
+
+        self._current_preset = preset_name
+        self._start_args = args
 
         self._process = QProcess(self)
         self._process.setProgram(str(exe))
@@ -273,6 +283,37 @@ class ZapretManager(QObject):
         self.stopped.emit()
 
     # ── internals ───────────────────────────────────────────────
+
+    @staticmethod
+    def _kill_orphaned() -> list[str]:
+        """Kill any orphaned winws.exe / winws2.exe processes."""
+        killed: list[str] = []
+        if os.name != "nt":
+            return killed
+        for exe_name in ("winws2.exe", "winws.exe"):
+            try:
+                result = subprocess.run(
+                    ["taskkill", "/F", "/IM", exe_name],
+                    capture_output=True, timeout=5,
+                    creationflags=_CREATE_NO_WINDOW,
+                )
+                if result.returncode == 0:
+                    killed.append(exe_name)
+            except Exception:
+                pass
+        if killed:
+            time.sleep(1)
+        return killed
+
+    @staticmethod
+    def _exit_code_hint(code: int) -> str:
+        """Return a human-readable hint for common winws2 exit codes."""
+        hints = {
+            1: "общая ошибка (другой экземпляр / не удалось открыть WinDivert)",
+            2: "ошибка аргументов командной строки",
+            3: "не удалось загрузить WinDivert драйвер (нужны права администратора)",
+        }
+        return hints.get(code, "")
 
     def _drain_output(self) -> list[str]:
         """Read any remaining stdout/stderr from the process."""
@@ -313,18 +354,32 @@ class ZapretManager(QObject):
         for line in remaining:
             self.log_line.emit(f"[zapret] {line}")
 
-        log.info("zapret finished: code=%d status=%s", exit_code, exit_status.name)
+        preset = self._current_preset or "?"
+        log.info("zapret finished: code=%d status=%s preset=%s", exit_code, exit_status.name, preset)
 
         if exit_code != 0 or exit_status == QProcess.ExitStatus.CrashExit:
-            detail = "\n".join(remaining) if remaining else "нет вывода"
-            self.log_line.emit(
-                f"[zapret] Процесс завершился с кодом {exit_code}"
-            )
-            self.error.emit(
-                f"winws2 завершился с кодом {exit_code}\n{detail}"
-            )
+            # Подробности в лог
+            hint = self._exit_code_hint(exit_code)
+            if hint:
+                self.log_line.emit(f"[zapret] Код {exit_code}: {hint}")
+            self.log_line.emit(f"[zapret] Пресет: {preset}")
+            if self._start_args:
+                preview = " ".join(self._start_args[:6])
+                if len(self._start_args) > 6:
+                    preview += f" ... (+{len(self._start_args) - 6} аргументов)"
+                self.log_line.emit(f"[zapret] Команда: winws2.exe {preview}")
+            if not remaining:
+                self.log_line.emit("[zapret] Процесс не вывел ничего в stdout/stderr")
+
+            # Краткое сообщение для InfoBar и status_label
+            short = f"winws2 завершился с кодом {exit_code}"
+            if hint:
+                short += f" — {hint}"
+            self.error.emit(short)
 
         self._process = None
+        self._current_preset = ""
+        self._start_args = []
         self.stopped.emit()
 
     def _check_health(self) -> None:

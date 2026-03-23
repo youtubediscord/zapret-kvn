@@ -174,11 +174,22 @@ def resolve_xray_release(channel: str, feed_url: str = "") -> XrayCoreRelease | 
     )
 
 
-def _download_file(url: str, destination: Path) -> None:
+def _download_file(url: str, destination: Path, on_progress=None) -> None:
+    """Download file with optional progress callback(downloaded, total)."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     request = Request(url, headers={"User-Agent": "ZapretKVN/0.4"})
-    with urlopen(request, timeout=60) as response, open(destination, "wb") as file:
-        shutil.copyfileobj(response, file)
+    with urlopen(request, timeout=120) as response:
+        total = int(response.headers.get("Content-Length", 0))
+        downloaded = 0
+        with open(destination, "wb") as file:
+            while True:
+                chunk = response.read(1024 * 1024)  # 1 MB
+                if not chunk:
+                    break
+                file.write(chunk)
+                downloaded += len(chunk)
+                if on_progress and total > 0:
+                    on_progress(downloaded, total)
 
 
 def _sha256_file(file_path: Path) -> str:
@@ -231,6 +242,7 @@ def check_and_update_xray_core(
     channel: str,
     feed_url: str = "",
     apply_update: bool = False,
+    on_progress=None,
 ) -> XrayCoreUpdateResult:
     exe = resolve_configured_path(
         xray_path,
@@ -300,7 +312,7 @@ def check_and_update_xray_core(
         temp_dir = Path(temp_dir_str)
         archive_path = temp_dir / "Xray-windows-64.zip"
         try:
-            _download_file(release.url, archive_path)
+            _download_file(release.url, archive_path, on_progress=on_progress)
         except Exception as exc:
             return XrayCoreUpdateResult(
                 status="error",
@@ -349,6 +361,7 @@ def check_and_update_xray_core(
 
 class XrayCoreUpdateWorker(QThread):
     done = pyqtSignal(object)
+    progress = pyqtSignal(int)  # percent 0-100
 
     def __init__(
         self,
@@ -369,5 +382,6 @@ class XrayCoreUpdateWorker(QThread):
             self._channel,
             self._feed_url,
             apply_update=self._apply_update,
+            on_progress=lambda d, t: self.progress.emit(int(d * 100 / t)),
         )
         self.done.emit(result)

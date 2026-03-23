@@ -25,7 +25,7 @@ from ..country_flags import get_flag_icon
 from ..models import Node
 from .node_detail_widget import NodeDetailWidget
 
-_SORT_KEYS = ["Имя", "Группа", "Тип", "Пинг", "Скорость", "Последнее использование"]
+_SORT_KEYS = ["Вручную", "Имя", "Группа", "Тип", "Пинг", "Скорость", "Последнее использование"]
 
 _COLUMN_SORT_MAP = {
     0: "Имя",
@@ -48,6 +48,7 @@ class NodesPage(QWidget):
     edit_node_requested = pyqtSignal(str)           # node_id
     bulk_edit_requested = pyqtSignal(object)        # set[str] of node_ids
     copy_link_requested = pyqtSignal(str)           # node_id
+    reorder_requested = pyqtSignal(str, str)        # node_id, direction
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -159,6 +160,18 @@ class NodesPage(QWidget):
         self.delete_btn.setToolTip("Удалить выбранные")
         toolbar.addWidget(self.delete_btn)
 
+        toolbar.addWidget(VerticalSeparator(self))
+
+        self.move_up_btn = TransparentToolButton(FIF.UP, self)
+        self.move_up_btn.setToolTip("Переместить вверх")
+        self.move_up_btn.setEnabled(False)
+        toolbar.addWidget(self.move_up_btn)
+
+        self.move_down_btn = TransparentToolButton(FIF.DOWN, self)
+        self.move_down_btn.setToolTip("Переместить вниз")
+        self.move_down_btn.setEnabled(False)
+        toolbar.addWidget(self.move_down_btn)
+
         toolbar.addStretch()
 
         root.addLayout(toolbar)
@@ -224,6 +237,8 @@ class NodesPage(QWidget):
         self.speed_test_btn.clicked.connect(self._on_speed_test_selected)
         self.speed_test_all_btn.clicked.connect(self._on_speed_test_all)
         self.delete_btn.clicked.connect(self._on_delete_selected)
+        self.move_up_btn.clicked.connect(self._on_move_up)
+        self.move_down_btn.clicked.connect(self._on_move_down)
         self.table.itemSelectionChanged.connect(self._emit_selection)
         self.table.doubleClicked.connect(self._on_double_click)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
@@ -311,6 +326,7 @@ class NodesPage(QWidget):
     # ── Reload / filter / sort ──
 
     def _reload(self) -> None:
+        prev_selected = self._selected_ids()
         query = self.search_edit.text().strip().lower()
         group_filter = self.group_filter.currentText()
         tag_filter = self.tag_filter.currentText()
@@ -381,8 +397,16 @@ class NodesPage(QWidget):
         self.table.blockSignals(False)
         self.table.setUpdatesEnabled(True)
 
+        if prev_selected:
+            for row, nid in enumerate(self._visible_node_ids):
+                if nid in prev_selected:
+                    self.table.selectRow(row)
+                    break
+
     @staticmethod
     def _sort_nodes(nodes: list[Node], key: str, ascending: bool) -> list[Node]:
+        if key == "Вручную":
+            return sorted(nodes, key=lambda n: n.sort_order, reverse=not ascending)
         if key == "Имя":
             return sorted(nodes, key=lambda n: n.name.lower(), reverse=not ascending)
         if key == "Группа":
@@ -447,10 +471,23 @@ class NodesPage(QWidget):
     def _emit_selection(self) -> None:
         ids = self._selected_ids()
         self.bulk_edit_btn.setVisible(len(ids) > 1)
+        is_manual = self.sort_combo.currentText() == "Вручную"
+        self.move_up_btn.setEnabled(is_manual and len(ids) == 1)
+        self.move_down_btn.setEnabled(is_manual and len(ids) == 1)
         if len(ids) == 1:
             self.selected_node_changed.emit(next(iter(ids)))
 
     # ── Button handlers ──
+
+    def _on_move_up(self) -> None:
+        ids = self._selected_ids()
+        if len(ids) == 1:
+            self.reorder_requested.emit(next(iter(ids)), "up")
+
+    def _on_move_down(self) -> None:
+        ids = self._selected_ids()
+        if len(ids) == 1:
+            self.reorder_requested.emit(next(iter(ids)), "down")
 
     def _on_edit(self) -> None:
         ids = self._selected_ids()
@@ -568,6 +605,16 @@ class NodesPage(QWidget):
         delete_action = Action(delete_label, self)
         delete_action.triggered.connect(lambda: self.delete_requested.emit(ids))
         menu.addAction(delete_action)
+
+        if count == 1 and self.sort_combo.currentText() == "Вручную":
+            node_id = next(iter(ids))
+            menu.addSeparator()
+            move_top = Action("В начало списка", self)
+            move_top.triggered.connect(lambda: self.reorder_requested.emit(node_id, "top"))
+            menu.addAction(move_top)
+            move_bottom = Action("В конец списка", self)
+            move_bottom.triggered.connect(lambda: self.reorder_requested.emit(node_id, "bottom"))
+            menu.addAction(move_bottom)
 
         menu.exec(QCursor.pos())
 

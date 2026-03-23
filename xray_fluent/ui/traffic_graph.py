@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QWidget
+from qfluentwidgets import isDarkTheme
 
 if TYPE_CHECKING:
     from PyQt6.QtGui import QPaintEvent, QMouseEvent
@@ -101,6 +102,8 @@ class TrafficGraphDialog(QDialog):
         self.setWindowTitle("История трафика")
         self.setMinimumSize(700, 420)
         self.resize(800, 480)
+        bg = "#2b2b2b" if isDarkTheme() else "#f3f3f3"
+        self.setStyleSheet(f"TrafficGraphDialog {{ background-color: {bg}; }}")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)

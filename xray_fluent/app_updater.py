@@ -9,8 +9,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import urllib.request
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.request import Request
@@ -87,6 +89,8 @@ class UpdateChecker(QThread):
 _log = logging.getLogger(__name__)
 
 _DOWNLOAD_TIMEOUT = 30  # seconds — per socket operation (connect + each read)
+_NUM_SEGMENTS = 4       # parallel download segments
+_CHUNK_SIZE = 1024 * 1024  # 1 MB
 
 
 class UpdateDownloader(QThread):
@@ -102,28 +106,61 @@ class UpdateDownloader(QThread):
         self._update = update
         self._proxy_url = proxy_url
 
-    # ── download helper ─────────────────────────────────────────
+    # ── download helpers ────────────────────────────────────────
 
-    def _download(self, zip_path: Path, proxy_url: str | None) -> None:
-        """Download update zip. Raises on failure/stall.
-
-        Socket timeout (_DOWNLOAD_TIMEOUT) applies to each read() call,
-        so a dead proxy will raise within 30 s instead of hanging forever.
-        """
-        req = Request(self._update.download_url, headers={"User-Agent": USER_AGENT})
+    def _build_opener(self, proxy_url: str | None) -> urllib.request.OpenerDirector:
         if proxy_url:
             handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-            opener = build_opener(handler)
-        else:
-            opener = build_opener()
+            return build_opener(handler)
+        return build_opener()
 
+    def _supports_range(self, url: str, opener: urllib.request.OpenerDirector) -> tuple[bool, int]:
+        """HEAD request to check Range support and get Content-Length."""
+        req = Request(url, method="HEAD", headers={"User-Agent": USER_AGENT})
+        with opener.open(req, timeout=_DOWNLOAD_TIMEOUT) as resp:
+            accepts = resp.headers.get("Accept-Ranges", "").lower()
+            length = int(resp.headers.get("Content-Length", 0))
+            return accepts == "bytes" and length > 0, length
+
+    def _download_segment(
+        self,
+        url: str,
+        proxy_url: str | None,
+        start: int,
+        end: int,
+        seg_path: Path,
+        seg_index: int,
+        lock: threading.Lock,
+        progress_arr: list[int],
+        total: int,
+    ) -> None:
+        """Download one segment with Range header."""
+        opener = self._build_opener(proxy_url)
+        req = Request(url, headers={
+            "User-Agent": USER_AGENT,
+            "Range": f"bytes={start}-{end}",
+        })
+        with opener.open(req, timeout=_DOWNLOAD_TIMEOUT) as resp:
+            with open(seg_path, "wb") as f:
+                while True:
+                    chunk = resp.read(_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    with lock:
+                        progress_arr[seg_index] += len(chunk)
+                        done = sum(progress_arr)
+                        self.progress.emit(int(done * 100 / total))
+
+    def _download_single(self, url: str, opener: urllib.request.OpenerDirector, zip_path: Path) -> None:
+        """Single-connection fallback download."""
+        req = Request(url, headers={"User-Agent": USER_AGENT})
         with opener.open(req, timeout=_DOWNLOAD_TIMEOUT) as resp:
             total = int(resp.headers.get("Content-Length", 0))
             downloaded = 0
-
             with open(zip_path, "wb") as f:
                 while True:
-                    chunk = resp.read(256 * 1024)
+                    chunk = resp.read(_CHUNK_SIZE)
                     if not chunk:
                         if downloaded == 0:
                             raise TimeoutError("Сервер не отдаёт данные")
@@ -132,6 +169,67 @@ class UpdateDownloader(QThread):
                     downloaded += len(chunk)
                     if total > 0:
                         self.progress.emit(int(downloaded * 100 / total))
+
+    def _download(self, zip_path: Path, proxy_url: str | None) -> None:
+        """Download update zip with multi-segment acceleration.
+
+        Tries parallel Range-based download first; falls back to single
+        connection if the server doesn't support Range requests.
+        """
+        url = self._update.download_url
+        opener = self._build_opener(proxy_url)
+
+        # Check if server supports Range requests
+        try:
+            supports_range, total = self._supports_range(url, opener)
+        except Exception:
+            supports_range, total = False, 0
+
+        if not supports_range or total == 0 or total < _NUM_SEGMENTS * _CHUNK_SIZE:
+            _log.info("Server does not support Range or file too small — single download")
+            self._download_single(url, opener, zip_path)
+            return
+
+        # Split into segments
+        seg_size = total // _NUM_SEGMENTS
+        segments: list[tuple[int, int]] = []
+        for i in range(_NUM_SEGMENTS):
+            start = i * seg_size
+            end = total - 1 if i == _NUM_SEGMENTS - 1 else (i + 1) * seg_size - 1
+            segments.append((start, end))
+
+        # Prepare temp segment files
+        seg_dir = zip_path.parent / "_segments"
+        seg_dir.mkdir(exist_ok=True)
+        seg_paths = [seg_dir / f"seg_{i}" for i in range(_NUM_SEGMENTS)]
+
+        lock = threading.Lock()
+        progress_arr = [0] * _NUM_SEGMENTS
+
+        # Download segments in parallel
+        try:
+            with ThreadPoolExecutor(max_workers=_NUM_SEGMENTS) as pool:
+                futures = []
+                for i, (start, end) in enumerate(segments):
+                    fut = pool.submit(
+                        self._download_segment,
+                        url, proxy_url, start, end,
+                        seg_paths[i], i, lock, progress_arr, total,
+                    )
+                    futures.append(fut)
+
+                # Re-raise any segment exception
+                for fut in futures:
+                    fut.result()
+
+            # Concatenate segments into final file
+            with open(zip_path, "wb") as out:
+                for sp in seg_paths:
+                    with open(sp, "rb") as seg_f:
+                        shutil.copyfileobj(seg_f, out)
+        finally:
+            # Clean up segment temp files
+            shutil.rmtree(seg_dir, ignore_errors=True)
 
     # ── main thread entry ───────────────────────────────────────
 

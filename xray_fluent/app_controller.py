@@ -15,7 +15,7 @@ from .constants import APP_NAME, LOG_DIR, ROUTING_MODES, SINGBOX_CLASH_API_PORT,
 from .diagnostics import export_diagnostics
 from .link_parser import parse_links_text
 from .live_metrics_worker import LiveMetricsWorker
-from .models import AppSettings, AppState, Node
+from .models import AppSettings, AppState, Node, RoutingSettings
 from .network_monitor import NetworkMonitor
 from .ping_worker import PingWorker
 from .speed_test_worker import SpeedTestWorker
@@ -113,6 +113,7 @@ class AppController(QObject):
             return False
 
         self._detect_countries_sync()
+        self._migrate_sort_order()
         self.nodes_changed.emit(self.state.nodes)
         self.selection_changed.emit(self.selected_node)
         self.routing_changed.emit(self.state.routing)
@@ -264,6 +265,7 @@ class AppController(QObject):
             return 0, errors
 
         existing_links = {node.link for node in self.state.nodes}
+        max_order = max((n.sort_order for n in self.state.nodes), default=0)
         first_new_id: str | None = None
         added = 0
         for node in nodes:
@@ -271,6 +273,8 @@ class AppController(QObject):
                 continue
             if not node.country_code:
                 node.country_code = detect_country(node.name, node.server)
+            max_order += 1
+            node.sort_order = max_order
             self.state.nodes.append(node)
             existing_links.add(node.link)
             if first_new_id is None:
@@ -352,6 +356,34 @@ class AppController(QObject):
         for node in self.state.nodes:
             tags.update(node.tags)
         return sorted(tags)
+
+    def _migrate_sort_order(self) -> None:
+        if self.state.nodes and all(n.sort_order == 0 for n in self.state.nodes):
+            for i, node in enumerate(self.state.nodes):
+                node.sort_order = i + 1
+            self.save()
+
+    def reorder_nodes(self, node_id: str, direction: str) -> None:
+        ordered = sorted(self.state.nodes, key=lambda n: n.sort_order)
+        idx = next((i for i, n in enumerate(ordered) if n.id == node_id), None)
+        if idx is None:
+            return
+        if direction == "up" and idx > 0:
+            ordered[idx], ordered[idx - 1] = ordered[idx - 1], ordered[idx]
+        elif direction == "down" and idx < len(ordered) - 1:
+            ordered[idx], ordered[idx + 1] = ordered[idx + 1], ordered[idx]
+        elif direction == "top" and idx > 0:
+            node = ordered.pop(idx)
+            ordered.insert(0, node)
+        elif direction == "bottom" and idx < len(ordered) - 1:
+            node = ordered.pop(idx)
+            ordered.append(node)
+        else:
+            return
+        for i, node in enumerate(ordered):
+            node.sort_order = i + 1
+        self.nodes_changed.emit(self.state.nodes)
+        self.save()
 
     def set_selected_node(self, node_id: str) -> None:
         if self.state.selected_node_id == node_id:
@@ -502,23 +534,10 @@ class AppController(QObject):
         index = (index - 1) % len(self.state.nodes)
         self.set_selected_node(self.state.nodes[index].id)
 
-    def update_routing(
-        self,
-        mode: str,
-        direct_domains: list[str],
-        proxy_domains: list[str],
-        block_domains: list[str],
-        bypass_lan: bool,
-        dns_mode: str,
-    ) -> None:
-        if mode not in ROUTING_MODES:
-            mode = "rule"
-        self.state.routing.mode = mode
-        self.state.routing.direct_domains = direct_domains
-        self.state.routing.proxy_domains = proxy_domains
-        self.state.routing.block_domains = block_domains
-        self.state.routing.bypass_lan = bypass_lan
-        self.state.routing.dns_mode = dns_mode
+    def update_routing(self, routing: RoutingSettings) -> None:
+        if routing.mode not in ROUTING_MODES:
+            routing.mode = "rule"
+        self.state.routing = routing
         self.routing_changed.emit(self.state.routing)
         self.save()
 

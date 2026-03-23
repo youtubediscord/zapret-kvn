@@ -12,6 +12,7 @@ from .constants import (
     XRAY_STATS_API_PORT,
 )
 from .models import AppSettings, Node, RoutingSettings
+from .service_presets import SERVICE_PRESETS_BY_ID
 
 
 def _normalize_loglevel(value: str) -> str:
@@ -101,6 +102,31 @@ def build_xray_config(node: Node, routing: RoutingSettings, settings: AppSetting
     _append_domain_ip_rule(routing_rules, routing.direct_domains, "direct")
     _append_domain_ip_rule(routing_rules, routing.block_domains, "block")
     _append_domain_ip_rule(routing_rules, routing.proxy_domains, "proxy")
+
+    # Merge service preset domains
+    service_direct: list[str] = []
+    service_proxy: list[str] = []
+    for svc_id, action in routing.service_routes.items():
+        preset = SERVICE_PRESETS_BY_ID.get(svc_id)
+        if not preset:
+            continue
+        if action == "direct":
+            service_direct.extend(preset.domains)
+        else:
+            service_proxy.extend(preset.domains)
+    _append_domain_ip_rule(routing_rules, service_direct, "direct")
+    _append_domain_ip_rule(routing_rules, service_proxy, "proxy")
+
+    if not settings.tun_mode:
+        for pr in routing.process_rules:
+            name = pr.get("process", "").strip()
+            action = pr.get("action", "direct")
+            if name:
+                routing_rules.append({
+                    "type": "field",
+                    "processName": [name],
+                    "outboundTag": action if action in ("direct", "proxy", "block") else "direct",
+                })
 
     mode = routing.mode
 
