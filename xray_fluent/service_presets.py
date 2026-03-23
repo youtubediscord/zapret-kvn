@@ -352,6 +352,16 @@ SERVICE_PRESETS: tuple[ServicePreset, ...] = (
         ),
     ),
     ServicePreset(
+        id="maxru",
+        name="Max.ru",
+        icon=FIF.GLOBE,
+        description="Max.ru и поддомены",
+        default_action="proxy",
+        domains=(
+            "max.ru",
+        ),
+    ),
+    ServicePreset(
         id="speedtest",
         name="Speedtest",
         icon=FIF.SPEED_HIGH,

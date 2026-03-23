@@ -10,6 +10,7 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from .country_flags import CountryResolver, detect_country
 from .config_builder import build_xray_config
+from .singbox_config_builder import build_singbox_config, build_xray_socks_config, needs_xray_hybrid
 from .connectivity_test import ConnectivityTestWorker
 from .constants import APP_NAME, LOG_DIR, ROUTING_MODES, SINGBOX_CLASH_API_PORT, XRAY_STATS_API_PORT
 from .diagnostics import export_diagnostics
@@ -293,8 +294,8 @@ class AppController(QObject):
 
         if added:
             # In TUN mode, hot-swap xray instead of full reconnect
-            if self._active_core == "tun2socks" and self.tun2socks.is_running:
-                self._hot_swap_xray("new node imported")
+            if self._active_core == "singbox" and self.singbox.is_running:
+                self._hot_swap_node("new node imported")
             else:
                 self.connect_selected()
 
@@ -394,9 +395,9 @@ class AppController(QObject):
 
         # Defer connection work so the UI updates immediately
         if self.connected:
-            # In TUN mode, only restart xray — keep tun2socks TUN alive
-            if self._active_core == "tun2socks" and self.state.settings.tun_mode:
-                QTimer.singleShot(0, lambda: self._hot_swap_xray("node switched"))
+            # In TUN mode, hot-swap node — keep sing-box TUN alive if possible
+            if self._active_core == "singbox" and self.state.settings.tun_mode:
+                QTimer.singleShot(0, lambda: self._hot_swap_node("node switched"))
             else:
                 QTimer.singleShot(0, lambda: self._reconnect("node switched"))
         else:
@@ -431,38 +432,33 @@ class AppController(QObject):
             if self.proxy.is_enabled():
                 self.proxy.disable(restore_previous=True)
 
-            # Start xray
-            self.status.emit("info", "Запуск Xray...")
-            xray_cfg = build_xray_config(node, self.state.routing, self.state.settings)
-            xray_cfg["log"] = {"loglevel": "error"}
-            socks_port = self.state.settings.socks_port
-            xray_cfg["inbounds"] = [
-                ib for ib in xray_cfg.get("inbounds", [])
-                if ib.get("protocol") not in ("",)  # keep all inbounds including HTTP
-            ]
-            routing = xray_cfg.setdefault("routing", {})
-            rules = routing.setdefault("rules", [])
-            rules.insert(0, {
-                "type": "field",
-                "ip": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "224.0.0.0/4", "255.255.255.255/32"],
-                "outboundTag": "block",
-            })
-            xray_ok = self.xray.start(self.state.settings.xray_path, xray_cfg)
-            if not xray_ok:
-                self._log("[tun] xray start failed")
-                self.status.emit("error", "Не удалось запустить Xray. Проверьте логи.")
-                return False
-            self.status.emit("info", "Xray запущен. Создание TUN адаптера...")
+            self._tun_log_count = 0
 
-            # Start tun2socks
-            self._log(f"[tun] starting tun2socks -> SOCKS 127.0.0.1:{socks_port}")
-            tun_ok = self.tun2socks.start(socks_port, server_ip=node.server)
-            self._log(f"[tun] tun2socks start result: {tun_ok}")
-            if not tun_ok:
-                self.xray.stop()
+            hybrid = needs_xray_hybrid(node)
+
+            if hybrid:
+                # Hybrid: xray handles the proxy protocol, sing-box handles TUN + routing
+                self.status.emit("info", "Запуск Xray (SOCKS)...")
+                xray_cfg = build_xray_socks_config(node, self.state.routing, self.state.settings)
+                xray_cfg["log"] = {"loglevel": "error"}
+                xray_ok = self.xray.start(self.state.settings.xray_path, xray_cfg)
+                if not xray_ok:
+                    self._log("[tun] xray start failed")
+                    self.status.emit("error", "Не удалось запустить Xray. Проверьте логи.")
+                    return False
+                self.status.emit("info", "Xray запущен. Создание TUN адаптера...")
+
+            # Start sing-box TUN (handles process routing via process_name)
+            sb_cfg = build_singbox_config(node, self.state.routing, self.state.settings)
+            self._log(f"[tun] starting sing-box TUN (hybrid={hybrid})")
+            sb_ok = self.singbox.start(self.state.settings.singbox_path, sb_cfg)
+            self._log(f"[tun] sing-box start result: {sb_ok}")
+            if not sb_ok:
+                if hybrid:
+                    self.xray.stop()
                 self.status.emit("error", "Не удалось создать TUN адаптер. Проверьте наличие wintun.dll в core/.")
                 return False
-            self._active_core = "tun2socks"
+            self._active_core = "singbox"
         else:
             config = build_xray_config(node, self.state.routing, self.state.settings)
             ok = self.xray.start(self.state.settings.xray_path, config)
@@ -483,13 +479,9 @@ class AppController(QObject):
         return True
 
     def disconnect_current(self, disable_proxy: bool = True, emit_status: bool = True) -> bool:
-        if self._active_core == "tun2socks":
+        if self._active_core == "singbox":
             if emit_status:
                 self.status.emit("info", "Остановка VPN...")
-            stopped = self.tun2socks.stop()
-            if self.xray.is_running:
-                self.xray.stop()
-        elif self._active_core == "singbox":
             stopped = self.singbox.stop()
             if self.xray.is_running:
                 self.xray.stop()
@@ -757,7 +749,7 @@ class AppController(QObject):
 
     def _on_xray_log(self, line: str) -> None:
         # In TUN mode, throttle noisy per-connection logs to prevent UI freeze
-        if self._active_core == "tun2socks" and "accepted" in line:
+        if self._active_core == "singbox" and "accepted" in line:
             self._tun_log_count = getattr(self, "_tun_log_count", 0) + 1
             # Only log to file, skip UI — emit summary every 100 lines
             self._logger.info(line)
@@ -870,46 +862,49 @@ class AppController(QObject):
         self._log(f"[network] changed: {old} -> {new}")
         # TUN mode creates a virtual adapter which triggers network change —
         # reconnecting would kill the TUN and cause an infinite loop
-        if self._active_core in ("singbox", "tun2socks") and self.state.settings.tun_mode:
+        if self._active_core == "singbox" and self.state.settings.tun_mode:
             self._log("[network] ignoring change in TUN mode")
             return
         if self.connected and self.state.settings.reconnect_on_network_change:
             self._reconnect("network changed")
 
-    def _hot_swap_xray(self, reason: str) -> None:
-        """Restart only xray while keeping tun2socks TUN alive."""
+    def _hot_swap_node(self, reason: str) -> None:
+        """Switch node in TUN mode. In hybrid mode restarts only xray; native requires full reconnect."""
         node = self.selected_node
         if not node:
             return
-        self._switching = True
-        try:
-            self._log(f"[hot-swap] {reason} — restarting xray only, TUN stays up")
-            self.status.emit("info", f"Переключение на {node.name}...")
-            self.xray.stop()
-            xray_cfg = build_xray_config(node, self.state.routing, self.state.settings)
-            xray_cfg["log"] = {"loglevel": "error"}
-            xray_cfg["inbounds"] = [
-                ib for ib in xray_cfg.get("inbounds", [])
-                if ib.get("protocol") not in ("",)  # keep all inbounds
-            ]
-            routing = xray_cfg.setdefault("routing", {})
-            rules = routing.setdefault("rules", [])
-            rules.insert(0, {
-                "type": "field",
-                "ip": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "224.0.0.0/4", "255.255.255.255/32"],
-                "outboundTag": "block",
-            })
-            ok = self.xray.start(self.state.settings.xray_path, xray_cfg)
-            if ok:
-                node.last_used_at = datetime.now(timezone.utc).isoformat()
-                self.status.emit("success", f"Переключено: {node.name} (TUN)")
-                self.save()
-            else:
-                self._log("[hot-swap] xray restart failed")
-                self.status.emit("error", "Не удалось переключить сервер")
-        finally:
-            self._switching = False
-            self.connection_changed.emit(self.connected)
+
+        hybrid_now = self.xray.is_running  # xray running means we are in hybrid mode
+        hybrid_next = needs_xray_hybrid(node)
+
+        # Mode change (hybrid<->native) requires full reconnect
+        if hybrid_now != hybrid_next:
+            self._reconnect(f"{reason} (mode change)")
+            return
+
+        if hybrid_next:
+            # Hybrid: restart only xray, sing-box TUN stays alive
+            self._switching = True
+            try:
+                self._log(f"[hot-swap] {reason} — restarting xray only, sing-box TUN stays up")
+                self.status.emit("info", f"Переключение на {node.name}...")
+                self.xray.stop()
+                xray_cfg = build_xray_socks_config(node, self.state.routing, self.state.settings)
+                xray_cfg["log"] = {"loglevel": "error"}
+                ok = self.xray.start(self.state.settings.xray_path, xray_cfg)
+                if ok:
+                    node.last_used_at = datetime.now(timezone.utc).isoformat()
+                    self.status.emit("success", f"Переключено: {node.name} (TUN)")
+                    self.save()
+                else:
+                    self._log("[hot-swap] xray restart failed")
+                    self.status.emit("error", "Не удалось переключить сервер")
+            finally:
+                self._switching = False
+                self.connection_changed.emit(self.connected)
+        else:
+            # Native: sing-box holds the outbound, must do full reconnect
+            self._reconnect(f"{reason} (native mode)")
 
     def _reconnect(self, reason: str) -> None:
         if self._reconnecting:

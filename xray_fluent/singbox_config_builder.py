@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from copy import deepcopy
 from ipaddress import ip_network
+from pathlib import Path
 from typing import Any
 
 from .constants import (
@@ -75,14 +76,24 @@ def _build_hybrid_config(
 
     # In hybrid mode sing-box is just a TUN wrapper — all traffic goes to
     # xray SOCKS which handles DNS, routing, and the actual proxy protocol.
-    # Keep rules minimal: bypass loopback + LAN, send everything else to proxy.
+    # Keep rules minimal: bypass xray + loopback + LAN, send everything else to proxy.
     route_rules: list[dict[str, Any]] = []
+
+    # CRITICAL: bypass xray.exe to prevent routing loop.
+    # Without this, xray's "direct" outbound traffic gets captured by TUN
+    # and sent back to xray SOCKS, creating an infinite loop.
+    xray_bin = Path(settings.xray_path).name if settings.xray_path else "xray.exe"
+    route_rules.append({"process_name": [xray_bin], "outbound": "direct"})
+
     bypass_ips = ["127.0.0.0/8"]
     if node.server:
         bypass_ips.append(f"{node.server}/32")
     route_rules.append({"ip_cidr": bypass_ips, "outbound": "direct"})
     if routing.bypass_lan:
         route_rules.append({"ip_is_private": True, "outbound": "direct"})
+
+    # Process-based routing (sing-box detects originating process via OS APIs)
+    _append_process_rules(route_rules, routing)
 
     return {
         "log": {"level": "warn", "timestamp": True},
@@ -322,12 +333,27 @@ def _build_route_rules(routing: RoutingSettings, node: Node) -> list[dict[str, A
     _append_singbox_rules(rules, routing.block_domains, "block")
     _append_singbox_rules(rules, routing.proxy_domains, "proxy")
 
+    # Process-based routing (sing-box detects originating process via OS APIs)
+    _append_process_rules(rules, routing)
+
     mode = routing.mode
     if mode == ROUTING_DIRECT:
         rules.append({"inbound": ["tun-in"], "outbound": "direct"})
     # For global and rule mode, default outbound is proxy (first outbound)
 
     return rules
+
+
+def _append_process_rules(rules: list[dict[str, Any]], routing: RoutingSettings) -> None:
+    """Group process rules by action and append as sing-box process_name rules."""
+    proc_by_action: dict[str, list[str]] = {}
+    for pr in routing.process_rules:
+        name = pr.get("process", "").strip()
+        action = pr.get("action", "proxy")
+        if name and action in ("direct", "proxy", "block"):
+            proc_by_action.setdefault(action, []).append(name)
+    for action, names in proc_by_action.items():
+        rules.append({"process_name": names, "outbound": action})
 
 
 def _append_singbox_rules(

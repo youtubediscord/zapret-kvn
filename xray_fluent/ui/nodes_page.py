@@ -688,9 +688,14 @@ class NodesPage(QWidget):
         if node.is_alive is None:
             item = QTableWidgetItem("--")
         elif node.ping_ms is not None and node.speed_mbps is None and node.is_alive:
-            item = QTableWidgetItem("!")
-            item.setToolTip("Пинг есть, скорость нет — вероятно заблокирован провайдером")
-            item.setForeground(_ORANGE_BRUSH)
+            if node.speed_history:
+                # Тест скорости запускался и провалился
+                item = QTableWidgetItem("!")
+                item.setToolTip("Пинг есть, скорость нет — вероятно заблокирован провайдером")
+                item.setForeground(_ORANGE_BRUSH)
+            else:
+                # Тест скорости не запускался — нейтральный статус
+                item = QTableWidgetItem("--")
         elif node.is_alive:
             item = QTableWidgetItem("OK")
             item.setToolTip("Сервер работает")

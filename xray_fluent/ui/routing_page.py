@@ -200,7 +200,7 @@ class RoutingPage(QWidget):
         root.addWidget(SubtitleLabel("Маршрутизация по процессам", container))
 
         self.process_info = CaptionLabel(
-            "Работает только в режиме системного прокси (без TUN)", container
+            "В режиме TUN перехватывает весь трафик процесса. В системном прокси — только если приложение использует прокси.", container
         )
         root.addWidget(self.process_info)
 
@@ -234,12 +234,12 @@ class RoutingPage(QWidget):
 
         root.addWidget(self._process_container)
 
-        self.tun_warning = CaptionLabel(
-            "В режиме TUN маршрутизация по процессам недоступна", container
+        self.proxy_warning = CaptionLabel(
+            "В системном прокси: правила действуют только для приложений, использующих прокси", container
         )
-        self.tun_warning.setStyleSheet("color: #e6a700;")
-        self.tun_warning.setVisible(False)
-        root.addWidget(self.tun_warning)
+        self.proxy_warning.setStyleSheet("color: #e6a700;")
+        self.proxy_warning.setVisible(False)
+        root.addWidget(self.proxy_warning)
 
         root.addStretch(1)
 
@@ -314,10 +314,11 @@ class RoutingPage(QWidget):
             self._emit_apply()
 
     def set_tun_mode(self, enabled: bool) -> None:
-        self._process_container.setEnabled(not enabled)
-        self.add_proc_btn.setEnabled(not enabled)
-        self.del_proc_btn.setEnabled(not enabled)
-        self.tun_warning.setVisible(enabled)
+        # Process routing works in both modes — show warning only in system proxy mode
+        self._process_container.setEnabled(True)
+        self.add_proc_btn.setEnabled(True)
+        self.del_proc_btn.setEnabled(True)
+        self.proxy_warning.setVisible(not enabled)
 
     # --- Rules table helpers ---
 

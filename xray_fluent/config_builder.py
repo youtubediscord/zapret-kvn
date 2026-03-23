@@ -124,7 +124,8 @@ def build_xray_config(node: Node, routing: RoutingSettings, settings: AppSetting
             if name:
                 routing_rules.append({
                     "type": "field",
-                    "processName": [name],
+                    "process": [name],
+                    "network": "tcp,udp",
                     "outboundTag": action if action in ("direct", "proxy", "block") else "direct",
                 })
 
