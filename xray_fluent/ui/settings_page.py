@@ -207,10 +207,10 @@ class SettingsPage(QWidget):
 
         self.tun_engine_card = _ComboCard(
             FIF.DEVELOPER_TOOLS, "Движок TUN",
-            "tun2socks — стабильный; sing-box — экспериментальный, поддержка маршрутизации по процессам",
+            "sing-box — маршрутизация по процессам, мониторинг трафика; tun2socks — запасной",
             [
-                ("tun2socks (стабильный)", "tun2socks"),
-                ("sing-box (эксперим.)", "singbox"),
+                ("sing-box (рекомендуемый)", "singbox"),
+                ("tun2socks (запасной)", "tun2socks"),
             ],
             parent=paths_group,
         )
@@ -474,7 +474,7 @@ class SettingsPage(QWidget):
         )
         self.xray_path_card.edit.setText(data.xray_path)
         self.singbox_path_card.edit.setText(data.singbox_path)
-        data.tun_engine = self.tun_engine_card.combo.currentData() or "tun2socks"
+        data.tun_engine = self.tun_engine_card.combo.currentData() or "singbox"
         data.start_minimized = self.start_min_card.isChecked()
         data.launch_on_startup = self.launch_card.isChecked()
         data.reconnect_on_network_change = self.reconnect_card.isChecked()

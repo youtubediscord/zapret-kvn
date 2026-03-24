@@ -716,6 +716,7 @@ class AppController(QObject):
         node = self.selected_node
         ping_host = node.server if node else ""
         ping_port = node.port if node else 0
+        self._log(f"[metrics] starting worker, active_core={self._active_core}")
 
         self._stop_metrics_worker()
         mode = "singbox" if self._active_core == "singbox" else "xray"

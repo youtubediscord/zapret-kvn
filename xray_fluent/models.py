@@ -185,7 +185,7 @@ class AppSettings:
     xray_update_feed_url: str = ""
     xray_auto_update: bool = False
     tun_mode: bool = False
-    tun_engine: str = "tun2socks"  # "tun2socks" | "singbox"
+    tun_engine: str = "singbox"  # "singbox" | "tun2socks"
     singbox_path: str = ""
     window_width: int = 1000
     window_height: int = 720
@@ -247,7 +247,7 @@ class AppSettings:
             xray_update_feed_url=str(data.get("xray_update_feed_url") or ""),
             xray_auto_update=bool(data.get("xray_auto_update", False)),
             tun_mode=bool(data.get("tun_mode", False)),
-            tun_engine=str(data.get("tun_engine") or "tun2socks"),
+            tun_engine=str(data.get("tun_engine") or "singbox"),
             singbox_path=str(data.get("singbox_path") or ""),
             window_width=int(data.get("window_width") or 1280),
             window_height=int(data.get("window_height") or 720),
