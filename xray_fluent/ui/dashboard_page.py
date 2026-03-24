@@ -222,17 +222,30 @@ class DashboardPage(QWidget):
         proc_layout.addLayout(proc_header)
 
         self._proc_traffic_table = TableWidget(self._proc_traffic_card)
-        self._proc_traffic_table.setColumnCount(6)
+        self._proc_traffic_table.setColumnCount(7)
         self._proc_traffic_table.setHorizontalHeaderLabels(
-            ["Процесс", "VPN", "Прямой", "Соед.", "Хост", "Всего"]
+            ["Процесс", "VPN", "Прямой", "Соед.", "Хост", "↓ Всего", "↑ Всего"]
         )
+        _col_tooltips = [
+            "Имя исполняемого файла приложения",
+            "Трафик через VPN (зашифрованный, через прокси-сервер)",
+            "Трафик напрямую (без VPN, к серверу напрямую)",
+            "Активные соединения (всего за сессию)",
+            "Домен или IP с наибольшим трафиком",
+            "Общий объём загрузки (скачивание)",
+            "Общий объём выгрузки (отправка)",
+        ]
+        for col, tip in enumerate(_col_tooltips):
+            item = self._proc_traffic_table.horizontalHeaderItem(col)
+            if item:
+                item.setToolTip(tip)
         self._proc_traffic_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Interactive
         )
         self._proc_traffic_table.horizontalHeader().setSectionResizeMode(
             4, QHeaderView.ResizeMode.Stretch
         )
-        for col in (1, 2, 3, 5):
+        for col in (1, 2, 3, 5, 6):
             self._proc_traffic_table.horizontalHeader().setSectionResizeMode(
                 col, QHeaderView.ResizeMode.ResizeToContents
             )
@@ -322,9 +335,9 @@ class DashboardPage(QWidget):
         proc_detail_layout.addWidget(self._proc_breadcrumb)
 
         self._proc_detail_table = TableWidget(self._proc_detail_page)
-        self._proc_detail_table.setColumnCount(6)
+        self._proc_detail_table.setColumnCount(7)
         self._proc_detail_table.setHorizontalHeaderLabels(
-            ["Процесс", "VPN", "Прямой", "Соединения", "Основной хост", "Всего"]
+            ["Процесс", "VPN", "Прямой", "Соединения", "Основной хост", "↓ Всего", "↑ Всего"]
         )
         self._proc_detail_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Interactive
@@ -332,10 +345,14 @@ class DashboardPage(QWidget):
         self._proc_detail_table.horizontalHeader().setSectionResizeMode(
             4, QHeaderView.ResizeMode.Stretch
         )
-        for col in (1, 2, 3, 5):
+        for col in (1, 2, 3, 5, 6):
             self._proc_detail_table.horizontalHeader().setSectionResizeMode(
                 col, QHeaderView.ResizeMode.ResizeToContents
             )
+        for col, tip in enumerate(_col_tooltips):
+            item = self._proc_detail_table.horizontalHeaderItem(col)
+            if item:
+                item.setToolTip(tip)
         self._proc_detail_table.verticalHeader().setVisible(False)
         self._proc_detail_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._proc_detail_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -470,9 +487,10 @@ class DashboardPage(QWidget):
             if len(host) > 30:
                 host = host[:27] + "..."
             self._proc_traffic_table.setItem(row, 4, QTableWidgetItem(host))
-            # Total
-            total = ps.upload + ps.download
-            self._proc_traffic_table.setItem(row, 5, QTableWidgetItem(self._format_bytes(total)))
+            # ↓ Total download
+            self._proc_traffic_table.setItem(row, 5, QTableWidgetItem(self._format_bytes(ps.download)))
+            # ↑ Total upload
+            self._proc_traffic_table.setItem(row, 6, QTableWidgetItem(self._format_bytes(ps.upload)))
         # Update detail page if visible
         if self._stack.currentIndex() == 2:
             self._update_proc_detail_table()
@@ -600,7 +618,7 @@ class DashboardPage(QWidget):
         rows = src.rowCount()
         dst.setRowCount(rows)
         for r in range(rows):
-            for c in range(6):
+            for c in range(7):
                 item = src.item(r, c)
                 if item:
                     new_item = QTableWidgetItem(item.text())
