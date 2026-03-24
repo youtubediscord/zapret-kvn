@@ -82,7 +82,9 @@ class SingBoxManager(QObject):
                 return False
 
             # TUN adapter creation can take several seconds
-            self._process.waitForReadyRead(3000)
+            self._process.waitForReadyRead(5000)
+            # Give extra time for potential FATAL errors
+            time.sleep(0.5)
             if self._process.state() == QProcess.ProcessState.NotRunning:
                 # Check if it was "file already exists" — retry after pause
                 if attempt < 2:
@@ -122,11 +124,13 @@ class SingBoxManager(QObject):
 
         self._stop_requested = expected
         self._process.terminate()
-        if self._process.waitForFinished(600):
+        if self._process.waitForFinished(3000):
+            time.sleep(1)  # give OS time to release TUN adapter
             return True
 
         self._process.kill()
-        if self._process.waitForFinished(400):
+        if self._process.waitForFinished(2000):
+            time.sleep(1)
             return True
 
         if self._process.state() == QProcess.ProcessState.NotRunning:
