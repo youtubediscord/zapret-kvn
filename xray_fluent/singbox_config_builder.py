@@ -237,7 +237,9 @@ def _build_xray_hybrid_config(
     from .config_builder import build_xray_config
     cfg = build_xray_config(node, routing, settings)
 
-    # Replace inbounds: SOCKS + API only
+    # Replace inbounds: internal SOCKS (for sing-box relay) + user proxy ports + API
+    socks_port = settings.socks_port or 10808
+    http_port = settings.http_port or 8080
     cfg["inbounds"] = [
         {
             "tag": "socks-in",
@@ -245,6 +247,29 @@ def _build_xray_hybrid_config(
             "listen": "127.0.0.1",
             "port": _XRAY_SOCKS_PORT,
             "settings": {"auth": "noauth", "udp": True},
+            "sniffing": {
+                "enabled": True,
+                "destOverride": ["http", "tls", "quic"],
+                "routeOnly": True,
+            },
+        },
+        {
+            "tag": "socks-user",
+            "protocol": "socks",
+            "listen": PROXY_HOST,
+            "port": socks_port,
+            "settings": {"auth": "noauth", "udp": True},
+            "sniffing": {
+                "enabled": True,
+                "destOverride": ["http", "tls", "quic"],
+                "routeOnly": True,
+            },
+        },
+        {
+            "tag": "http-user",
+            "protocol": "http",
+            "listen": PROXY_HOST,
+            "port": http_port,
             "sniffing": {
                 "enabled": True,
                 "destOverride": ["http", "tls", "quic"],
