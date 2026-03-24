@@ -143,6 +143,43 @@ class RoutingPage(QWidget):
         self.bypass_switch = SwitchButton("Обход локальной сети", container)
         header.addWidget(self.bypass_switch, 2, 0, 1, 2)
 
+        # --- TUN DNS settings (visible only in TUN mode) ---
+        self._dns_tun_widget = QWidget(container)
+        dns_grid = QGridLayout(self._dns_tun_widget)
+        dns_grid.setContentsMargins(0, 4, 0, 0)
+        dns_grid.setHorizontalSpacing(8)
+        dns_grid.setVerticalSpacing(6)
+
+        dns_grid.addWidget(CaptionLabel("Bootstrap DNS (direct):", container), 0, 0)
+        self._dns_bootstrap_server = ComboBox(container)
+        for label, ip in [("Cloudflare 1.1.1.1", "1.1.1.1"), ("Google 8.8.8.8", "8.8.8.8"),
+                          ("Quad9 9.9.9.9", "9.9.9.9"), ("Яндекс 77.88.8.8", "77.88.8.8"),
+                          ("OpenDNS 208.67.222.222", "208.67.222.222")]:
+            self._dns_bootstrap_server.addItem(label, userData=ip)
+        self._dns_bootstrap_server.setMinimumWidth(180)
+        dns_grid.addWidget(self._dns_bootstrap_server, 0, 1)
+
+        self._dns_bootstrap_type = ComboBox(container)
+        for label, val in [("UDP", "udp"), ("TCP", "tcp"), ("DoT (TLS)", "tls"), ("DoH (HTTPS)", "https")]:
+            self._dns_bootstrap_type.addItem(label, userData=val)
+        dns_grid.addWidget(self._dns_bootstrap_type, 0, 2)
+
+        dns_grid.addWidget(CaptionLabel("Proxy DNS (VPN):", container), 1, 0)
+        self._dns_proxy_server = ComboBox(container)
+        for label, ip in [("Google 8.8.8.8", "8.8.8.8"), ("Cloudflare 1.1.1.1", "1.1.1.1"),
+                          ("Quad9 9.9.9.9", "9.9.9.9"), ("OpenDNS 208.67.222.222", "208.67.222.222")]:
+            self._dns_proxy_server.addItem(label, userData=ip)
+        self._dns_proxy_server.setMinimumWidth(180)
+        dns_grid.addWidget(self._dns_proxy_server, 1, 1)
+
+        self._dns_proxy_type = ComboBox(container)
+        for label, val in [("TCP", "tcp"), ("DoT (TLS)", "tls"), ("DoH (HTTPS)", "https")]:
+            self._dns_proxy_type.addItem(label, userData=val)
+        dns_grid.addWidget(self._dns_proxy_type, 1, 2)
+
+        self._dns_tun_widget.setVisible(False)
+        header.addWidget(self._dns_tun_widget, 3, 0, 1, 2)
+
         root.addLayout(header)
 
         # --- Services section ---
@@ -290,6 +327,10 @@ class RoutingPage(QWidget):
         # --- Signals ---
         self.mode_combo.currentIndexChanged.connect(self._schedule_apply)
         self.dns_combo.currentIndexChanged.connect(self._schedule_apply)
+        self._dns_bootstrap_server.currentIndexChanged.connect(self._schedule_apply)
+        self._dns_bootstrap_type.currentIndexChanged.connect(self._schedule_apply)
+        self._dns_proxy_server.currentIndexChanged.connect(self._schedule_apply)
+        self._dns_proxy_type.currentIndexChanged.connect(self._schedule_apply)
         self.bypass_switch.checkedChanged.connect(self._schedule_apply)
         self.tun_default_combo.currentIndexChanged.connect(self._schedule_apply)
         self.add_rule_btn.clicked.connect(self._on_add_rule)

@@ -216,8 +216,8 @@ def _build_hybrid_singbox_config(
         },
         "dns": {
             "servers": [
-                {"tag": "bootstrap-dns", "type": "udp", "server": "1.1.1.1"},
-                {"tag": "proxy-dns", "type": "tcp", "server": "8.8.8.8", "detour": "proxy"},
+                {"tag": "bootstrap-dns", "type": routing.dns_bootstrap_type, "server": routing.dns_bootstrap_server},
+                {"tag": "proxy-dns", "type": routing.dns_proxy_type, "server": routing.dns_proxy_server, "detour": "proxy"},
             ],
             "final": "proxy-dns",
         },
@@ -326,8 +326,8 @@ def _build_native_config(
         },
         "dns": {
             "servers": [
-                {"tag": "bootstrap-dns", "type": "udp", "server": "1.1.1.1"},
-                {"tag": "proxy-dns", "type": "https", "server": "1.1.1.1", "detour": "proxy"},
+                {"tag": "bootstrap-dns", "type": routing.dns_bootstrap_type, "server": routing.dns_bootstrap_server},
+                {"tag": "proxy-dns", "type": routing.dns_proxy_type, "server": routing.dns_proxy_server, "detour": "proxy"},
             ],
             "final": "proxy-dns",
         },
