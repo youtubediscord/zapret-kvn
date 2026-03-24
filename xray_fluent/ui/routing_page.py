@@ -30,6 +30,7 @@ from qfluentwidgets import (
 )
 
 from ..models import RoutingSettings
+from ..process_presets import PROCESS_PRESETS
 from ..service_presets import SERVICE_PRESETS
 
 _ACTIONS = [
@@ -231,6 +232,22 @@ class RoutingPage(QWidget):
         self._tun_default_row_widget.setVisible(False)
         self.tun_default_info.setVisible(False)
 
+        # --- Process presets (quick-add app groups) ---
+        self._process_presets_group = SettingCardGroup("Быстрый выбор приложений", container)
+        self._process_preset_cards: dict[str, _ServiceRouteCard] = {}
+        for preset in PROCESS_PRESETS:
+            card = _ServiceRouteCard(
+                preset.icon,
+                preset.name,
+                preset.description,
+                parent=self._process_presets_group,
+            )
+            card.changed.connect(self._schedule_apply)
+            self._process_presets_group.addSettingCard(card)
+            self._process_preset_cards[preset.id] = card
+        root.addWidget(self._process_presets_group)
+        self._process_presets_group.setVisible(False)  # shown only in TUN mode
+
         self._process_container = QWidget(container)
         proc_layout = QVBoxLayout(self._process_container)
         proc_layout.setContentsMargins(0, 0, 0, 0)
@@ -312,6 +329,20 @@ class RoutingPage(QWidget):
             else:
                 card.set_state(False, "proxy")
 
+        # Populate process preset cards
+        use_proc_defaults = not routing.process_preset_routes
+        for preset_id, card in self._process_preset_cards.items():
+            if use_proc_defaults:
+                preset = next((p for p in PROCESS_PRESETS if p.id == preset_id), None)
+                if preset:
+                    card.set_state(True, preset.default_action)
+                else:
+                    card.set_state(False, "proxy")
+            elif preset_id in routing.process_preset_routes:
+                card.set_state(True, routing.process_preset_routes[preset_id])
+            else:
+                card.set_state(False, "proxy")
+
         rows: list[tuple[str, str]] = []
         for addr in routing.direct_domains:
             rows.append((addr, "direct"))
@@ -348,9 +379,10 @@ class RoutingPage(QWidget):
         self.add_proc_btn.setEnabled(True)
         self.del_proc_btn.setEnabled(True)
         self.proxy_warning.setVisible(not enabled)
-        # TUN default outbound only relevant in TUN mode
+        # TUN default outbound + process presets only relevant in TUN mode
         self._tun_default_row_widget.setVisible(enabled)
         self.tun_default_info.setVisible(enabled)
+        self._process_presets_group.setVisible(enabled)
 
     # --- Rules table helpers ---
 
@@ -519,7 +551,14 @@ class RoutingPage(QWidget):
             if enabled:
                 service_routes[svc_id] = action
 
-        tun_default_outbound = self.tun_default_combo.currentData() or "proxy"
+        # Collect process preset states
+        process_preset_routes: dict[str, str] = {}
+        for preset_id, card in self._process_preset_cards.items():
+            enabled, action = card.get_state()
+            if enabled:
+                process_preset_routes[preset_id] = action
+
+        tun_default_outbound = self.tun_default_combo.currentData() or "direct"
 
         routing = RoutingSettings(
             mode=str(mode),
@@ -529,6 +568,7 @@ class RoutingPage(QWidget):
             block_domains=block,
             dns_mode=str(dns_mode),
             process_rules=process_rules,
+            process_preset_routes=process_preset_routes,
             service_routes=service_routes,
             tun_default_outbound=str(tun_default_outbound),
         )

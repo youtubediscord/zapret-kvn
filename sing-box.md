@@ -229,6 +229,9 @@ FATAL: outbound DNS rule item is deprecated in sing-box 1.12.0 and will be remov
 2. outbound tag mismatch: routing rules генерируют `outbound: "proxy"`, а outbound назывался `"relay"` → `outbound not found: proxy`. Фикс: переименовать в `"proxy"`
 3. Google service routes (`google.com → direct`) потенциально перехватывают Telegram MTProto (фейковый TLS SNI)
 
+**Известные ограничения:**
+4. **Запрет (DPI bypass) + sing-box sniff несовместимы.** Запрет фрагментирует TLS ClientHello → sing-box sniff не может определить SNI/протокол → routing застревает на sniff action → соединение таймаутит. **Решение:** отключить запрет при использовании sing-box TUN (VPN и так обходит DPI).
+
 ---
 
 ## Рекомендация (обновлено 2026-03-24)

@@ -20,6 +20,7 @@ from .constants import (
     XRAY_STATS_API_PORT,
 )
 from .models import AppSettings, Node, RoutingSettings
+from .process_presets import PROCESS_PRESETS_BY_ID
 from .service_presets import SERVICE_PRESETS_BY_ID
 
 _XRAY_SOCKS_PORT = 11808
@@ -180,9 +181,10 @@ def _build_hybrid_singbox_config(
     _append_process_rules(route_rules, routing)
 
     # Default outbound for TUN
-    final_outbound = "proxy"
     if routing.tun_default_outbound == "direct":
-        route_rules.append({"inbound": ["tun-in"], "outbound": "direct"})
+        final_outbound = "direct"
+    else:
+        final_outbound = "proxy"
 
     return {
         "log": {"level": "warn", "timestamp": True},
@@ -300,6 +302,8 @@ def _build_native_config(
 
     route_rules = _build_route_rules(routing, node, settings)
 
+    final_outbound = "direct" if routing.tun_default_outbound == "direct" else "proxy"
+
     singbox_cfg: dict[str, Any] = {
         "log": {"level": "warn", "timestamp": True},
         "inbounds": [
@@ -317,6 +321,7 @@ def _build_native_config(
         "route": {
             "auto_detect_interface": True,
             "default_domain_resolver": "proxy-dns",
+            "final": final_outbound,
             "rules": route_rules,
         },
         "dns": {
@@ -497,23 +502,37 @@ def _build_route_rules(routing: RoutingSettings, node: Node, settings: AppSettin
 
     _append_process_rules(rules, routing)
 
-    # Default outbound for TUN
-    if routing.tun_default_outbound == "direct":
-        rules.append({"inbound": ["tun-in"], "outbound": "direct"})
-
     return rules
 
 
 def _append_process_rules(rules: list[dict[str, Any]], routing: RoutingSettings) -> None:
-    """Group process rules by action and append as sing-box process_name rules."""
+    """Group manual process rules + process presets by action and append."""
     proc_by_action: dict[str, list[str]] = {}
+
+    # Process presets (quick-add groups)
+    for preset_id, action in routing.process_preset_routes.items():
+        preset = PROCESS_PRESETS_BY_ID.get(preset_id)
+        if preset and action in ("direct", "proxy", "block"):
+            for exe in preset.processes:
+                proc_by_action.setdefault(action, []).append(exe)
+
+    # Manual process rules (user-added exe files)
     for pr in routing.process_rules:
         name = pr.get("process", "").strip()
         action = pr.get("action", "proxy")
         if name and action in ("direct", "proxy", "block"):
             proc_by_action.setdefault(action, []).append(name)
+
     for action, names in proc_by_action.items():
-        rules.append({"process_name": names, "outbound": action})
+        # Deduplicate (case-insensitive)
+        seen: set[str] = set()
+        unique: list[str] = []
+        for n in names:
+            low = n.lower()
+            if low not in seen:
+                seen.add(low)
+                unique.append(n)
+        rules.append({"process_name": unique, "outbound": action})
 
 
 def _append_singbox_rules(
