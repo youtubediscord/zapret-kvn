@@ -27,6 +27,7 @@ from .singbox_manager import SingBoxManager, get_singbox_version
 from .storage import PassphraseRequired, StateStorage
 from .startup import build_startup_command, set_startup_enabled
 from .xray_core_updater import XrayCoreUpdateResult, XrayCoreUpdateWorker
+from .traffic_history import TrafficHistoryStorage
 from .xray_manager import XrayManager, get_xray_version
 from .zapret_manager import ZapretManager
 
@@ -89,6 +90,8 @@ class AppController(QObject):
         self._active_core: str = "xray"  # "xray" | "singbox" | "tun2socks"
         self._protect_ss_port: int = 0
         self._protect_ss_password: str = ""
+        self._traffic_history = TrafficHistoryStorage()
+        self._traffic_save_counter = 0
 
         self.xray.log_received.connect(self._on_xray_log)
         self.xray.error.connect(self._on_xray_error)
@@ -500,9 +503,12 @@ class AppController(QObject):
         node.last_used_at = datetime.now(timezone.utc).isoformat()
         self.status.emit("success", f"Подключено: {node.name}" + (" (TUN)" if tun else ""))
         self.save()
+        node_name = node.name if node else "unknown"
+        self._traffic_history.start_session(node_name, self._active_core)
         return True
 
     def disconnect_current(self, disable_proxy: bool = True, emit_status: bool = True) -> bool:
+        self._traffic_history.end_session()
         if self._active_core == "singbox":
             if emit_status:
                 self.status.emit("info", "Остановка VPN...")
@@ -524,6 +530,10 @@ class AppController(QObject):
         if emit_status:
             self.status.emit("info", "Отключено")
         return stopped
+
+    @property
+    def traffic_history(self) -> TrafficHistoryStorage:
+        return self._traffic_history
 
     def toggle_connection(self) -> None:
         """Emergency override for tray icon."""
@@ -867,6 +877,17 @@ class AppController(QObject):
 
     def _on_live_metrics(self, payload: dict[str, object]) -> None:
         self.live_metrics_updated.emit(payload)
+        # Update traffic history with process stats
+        process_stats = payload.get("process_stats")
+        if process_stats:
+            stats_dict = {}
+            for ps in process_stats:
+                stats_dict[ps.exe] = (ps.upload, ps.download, ps.route)
+            self._traffic_history.update_session(stats_dict)
+            self._traffic_save_counter += 1
+            if self._traffic_save_counter >= 15:  # ~30 sec at 2s interval
+                self._traffic_history.save_periodic()
+                self._traffic_save_counter = 0
 
     def _on_xray_update_worker_done(self, result: XrayCoreUpdateResult) -> None:
         self._xray_update_worker = None

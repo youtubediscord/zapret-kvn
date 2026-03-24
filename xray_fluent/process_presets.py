@@ -74,6 +74,26 @@ PROCESS_PRESETS: tuple[ProcessPreset, ...] = (
         default_action="proxy",
     ),
 
+    # ── Torrents (default: direct — P2P traffic goes direct) ──
+    ProcessPreset(
+        id="torrents",
+        name="Торренты",
+        icon=FIF.CLOUD_DOWNLOAD,
+        description="qBittorrent, uTorrent, Transmission, Deluge, PicoTorrent",
+        processes=(
+            "qbittorrent.exe",
+            "uTorrent.exe",
+            "utorrentie.exe",
+            "BitTorrent.exe",
+            "Transmission-qt.exe",
+            "deluge.exe",
+            "PicoTorrent.exe",
+            "Vuze.exe",
+            "Tixati.exe",
+        ),
+        default_action="direct",
+    ),
+
     # ── Windows system (default: direct — bypass VPN to reduce server load) ──
     ProcessPreset(
         id="windows_system",

@@ -3,7 +3,17 @@ from __future__ import annotations
 from collections import deque
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QStackedWidget, QVBoxLayout, QWidget
+from PyQt6.QtGui import QColor
+from PyQt6.QtWidgets import (
+    QAbstractItemView,
+    QGridLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QStackedWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 from qfluentwidgets import (
     BodyLabel,
     BreadcrumbBar,
@@ -16,6 +26,7 @@ from qfluentwidgets import (
     StrongBodyLabel,
     SubtitleLabel,
     SwitchButton,
+    TableWidget,
 )
 
 from ..models import AppSettings, Node, RoutingSettings
@@ -197,6 +208,36 @@ class DashboardPage(QWidget):
         traffic_layout.addWidget(self.traffic_graph, 1)
         traffic_layout.addWidget(self.traffic_peak_label)
 
+        # ── Process traffic table (TUN mode only) ────────────
+        self._proc_traffic_card = CardWidget(self)
+        proc_layout = QVBoxLayout(self._proc_traffic_card)
+        proc_layout.setContentsMargins(18, 16, 18, 16)
+        proc_layout.setSpacing(6)
+        proc_layout.addWidget(StrongBodyLabel("Трафик по процессам", self._proc_traffic_card))
+
+        self._proc_traffic_table = TableWidget(self._proc_traffic_card)
+        self._proc_traffic_table.setColumnCount(5)
+        self._proc_traffic_table.setHorizontalHeaderLabels(
+            ["Процесс", "\u2193 Загрузка", "\u2191 Выгрузка", "Соед.", "Маршрут"]
+        )
+        self._proc_traffic_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        for col in range(1, 5):
+            self._proc_traffic_table.horizontalHeader().setSectionResizeMode(
+                col, QHeaderView.ResizeMode.ResizeToContents
+            )
+        self._proc_traffic_table.verticalHeader().setVisible(False)
+        self._proc_traffic_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self._proc_traffic_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.NoSelection
+        )
+        self._proc_traffic_table.setMinimumHeight(150)
+        proc_layout.addWidget(self._proc_traffic_table, 1)
+        self._proc_traffic_card.setVisible(False)
+
         # ── Routing card ──────────────────────────────────────
         self.routing_card = CardWidget(self)
         routing_layout = QVBoxLayout(self.routing_card)
@@ -223,6 +264,7 @@ class DashboardPage(QWidget):
         grid.addWidget(self.profile_card, 0, 1)
         grid.addWidget(self.traffic_card, 1, 0)
         grid.addWidget(self.routing_card, 1, 1)
+        grid.addWidget(self._proc_traffic_card, 2, 0, 1, 2)
         root.addLayout(grid)
         root.addStretch(1)
 
@@ -362,6 +404,43 @@ class DashboardPage(QWidget):
         if self._stack.currentIndex() == 1:
             self._detail_graph.add_point(self._last_down_bps, self._last_up_bps)
         self._refresh_dashboard()
+
+    def set_process_stats(self, stats: list | None) -> None:
+        if stats is None:
+            return
+        self._proc_traffic_card.setVisible(bool(stats))
+        self._proc_traffic_table.setRowCount(len(stats))
+        for row, ps in enumerate(stats):
+            self._proc_traffic_table.setItem(row, 0, QTableWidgetItem(ps.exe))
+            self._proc_traffic_table.setItem(
+                row, 1, QTableWidgetItem(self._format_bytes(ps.download))
+            )
+            self._proc_traffic_table.setItem(
+                row, 2, QTableWidgetItem(self._format_bytes(ps.upload))
+            )
+            self._proc_traffic_table.setItem(
+                row, 3, QTableWidgetItem(str(ps.connections))
+            )
+            route_text = (
+                "VPN"
+                if ps.route == "proxy"
+                else ("Прямой" if ps.route == "direct" else "Смешан.")
+            )
+            item = QTableWidgetItem(route_text)
+            if ps.route == "proxy":
+                item.setForeground(QColor("#2ecc71"))
+            self._proc_traffic_table.setItem(row, 4, item)
+
+    @staticmethod
+    def _format_bytes(b: int) -> str:
+        if b < 1024:
+            return f"{b} B"
+        elif b < 1024 * 1024:
+            return f"{b / 1024:.1f} KB"
+        elif b < 1024 * 1024 * 1024:
+            return f"{b / 1024 / 1024:.1f} MB"
+        else:
+            return f"{b / 1024 / 1024 / 1024:.2f} GB"
 
     # ── Refresh logic ─────────────────────────────────────────
 

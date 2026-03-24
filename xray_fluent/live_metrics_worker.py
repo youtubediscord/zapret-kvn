@@ -16,6 +16,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from .constants import XRAY_PATH_DEFAULT
 from .path_utils import resolve_configured_path
 from .ping_worker import tcp_ping
+from .process_traffic_collector import collect_process_stats, ProcessTrafficSnapshot
 
 
 class LiveMetricsWorker(QThread):
@@ -52,6 +53,7 @@ class LiveMetricsWorker(QThread):
         prev_downlink: int | None = None
         prev_ts: float | None = None
         last_ping_ts = 0.0
+        iteration_count = 0
 
         while not self._stopped:
             now = time.perf_counter()
@@ -79,14 +81,20 @@ class LiveMetricsWorker(QThread):
                 self._last_ping_ms = tcp_ping(self._ping_host, self._ping_port, timeout=1.6)
                 last_ping_ts = now
 
+            process_stats = None
+            if self._mode == "singbox" and iteration_count % 2 == 0:
+                process_stats = collect_process_stats(self._clash_api_port)
+
             self.metrics.emit(
                 {
                     "down_bps": down_bps,
                     "up_bps": up_bps,
                     "latency_ms": self._last_ping_ms,
+                    "process_stats": process_stats,
                 }
             )
 
+            iteration_count += 1
             slept = 0
             while slept < self._interval_ms and not self._stopped:
                 self.msleep(100)

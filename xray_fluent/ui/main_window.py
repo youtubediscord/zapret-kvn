@@ -273,6 +273,10 @@ class MainWindow(FluentWindow):
         latency = payload.get("latency_ms")
         latency_ms = int(latency) if isinstance(latency, int) else None
         self.dashboard_page.set_live_metrics(down_bps, up_bps, latency_ms)
+        # Process traffic stats (TUN mode with sing-box Clash API)
+        process_stats = payload.get("process_stats")
+        if process_stats is not None:
+            self.dashboard_page.set_process_stats(process_stats)
 
     def _on_xray_update_result(self, result: XrayCoreUpdateResult) -> None:
         self.logs_page.append_line(f"[core-update] {result.status}: {result.message}")

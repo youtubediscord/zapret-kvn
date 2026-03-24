@@ -242,6 +242,100 @@ FATAL: outbound DNS rule item is deprecated in sing-box 1.12.0 and will be remov
 4. Protect канал: `chacha20-ietf-poly1305` (method:none сломан между xray и sing-box)
 5. **НЕ использовать** `outbound` DNS rule items — deprecated в 1.12, удалены в 1.14. Вместо этого: `domain_resolver` на outbound'ах
 
+---
+
+## Справочник: правильная работа с sing-box TUN на Windows
+
+### Архитектура (hybrid mode для xhttp)
+
+```
+App traffic → TUN (sing-box) → process_name rules → proxy/direct
+  ├─ proxy → SOCKS:11808 → xray → dialerProxy → SS protect → sing-box direct → VPS
+  └─ direct → sing-box direct outbound → physical NIC → internet
+
+xray.exe, sing-box.exe → process_name → direct (защита от routing loop)
+tun-protect inbound → direct (protect канал)
+```
+
+### Обязательные настройки sing-box TUN
+
+```json
+{
+  "type": "tun",
+  "auto_route": true,
+  "strict_route": false,     // true ломает direct outbound на Windows!
+  "stack": "mixed"            // system или mixed, НЕ gvisor
+}
+```
+
+### DNS конфигурация
+
+**Два DNS сервера обязательны:**
+- `bootstrap-dns` — UDP, без detour, для direct трафика (resolve доменов при direct outbound)
+- `proxy-dns` — TCP/HTTPS/TLS через proxy detour, для proxy трафика
+
+```json
+"dns": {
+  "servers": [
+    {"tag": "bootstrap-dns", "type": "udp", "server": "1.1.1.1"},
+    {"tag": "proxy-dns", "type": "tcp", "server": "8.8.8.8", "detour": "proxy"}
+  ],
+  "final": "proxy-dns"
+}
+```
+
+**`domain_resolver` на outbound'ах (sing-box 1.14+):**
+- direct outbound: `"domain_resolver": "bootstrap-dns"`
+- proxy outbound: `"domain_resolver": "proxy-dns"`
+- route: `"default_domain_resolver": "proxy-dns"`
+
+**НЕ использовать:** `{"outbound": ["direct"], "server": "bootstrap-dns"}` в dns.rules — deprecated в 1.12, удалён в 1.14.
+
+**Доступные типы DNS:** `udp`, `tcp`, `tls` (DoT), `https` (DoH), `quic` (DoQ).
+**Доступные серверы:** 1.1.1.1 (Cloudflare), 8.8.8.8 (Google), 9.9.9.9 (Quad9), 208.67.222.222 (OpenDNS).
+
+### Protect канал (dialerProxy)
+
+```
+xray proxy outbound → dialerProxy:"tun-protect-out"
+  → SS outbound (chacha20-ietf-poly1305, random password, port 19200-19300)
+  → sing-box SS inbound "tun-protect"
+  → direct outbound → physical NIC → VPS
+```
+
+- **method:none НЕ совместим** между xray и sing-box — используем chacha20-ietf-poly1305
+- Пароль генерируется случайно при каждом подключении
+- Hot-swap: при смене ноды перезапускается только xray, sing-box TUN остаётся
+
+### Process routing правила
+
+**Порядок rules (важен!):**
+1. `sniff` — определить протокол/домен из TLS SNI
+2. `hijack-dns` — перехватить DNS пакеты
+3. Protected processes → direct (xray.exe, sing-box.exe, tun2socks.exe)
+4. `tun-protect` inbound → direct
+5. `ip_is_private` → direct (LAN bypass)
+6. Service domain routes (YouTube, Discord, etc.)
+7. User domain rules
+8. **Process presets** (Telegram→proxy, Windows system→direct)
+9. User manual process rules
+10. `route.final` — default outbound (proxy или direct)
+
+### Известные проблемы и ограничения
+
+1. **strict_route: true** ломает direct outbound на Windows — WFP перехватывает даже трафик от sing-box.exe
+2. **method:none** сломан между xray 26.2 и sing-box 1.14 — используем chacha20
+3. **Запрет (DPI bypass)** несовместим с sing-box sniff — фрагментация TLS ClientHello мешает определить SNI
+4. **sing-box 1.13.3** имеет баг direct outbound для inbound-initiated трафика (исправлен в 1.14)
+5. **Google service routes** (google.com→direct) могут перехватить Telegram MTProto (фейковый TLS SNI)
+6. **Per-process stats** доступны только через Clash API `GET /connections` (sing-box TUN mode)
+
+### Clash API endpoints
+
+- `GET /connections` — per-connection данные: processPath, upload, download, chains, rule
+- `GET /proxies` — список outbound'ов (без traffic stats)
+- `GET /rules` — активные правила
+
 ## Тестовая среда
 
 - Windows 10 IoT Enterprise LTSC 2021 (build 19044)
