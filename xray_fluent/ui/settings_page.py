@@ -205,8 +205,19 @@ class SettingsPage(QWidget):
             parent=paths_group,
         )
 
+        self.tun_engine_card = _ComboCard(
+            FIF.DEVELOPER_TOOLS, "Движок TUN",
+            "tun2socks — стабильный; sing-box — экспериментальный, поддержка маршрутизации по процессам",
+            [
+                ("tun2socks (стабильный)", "tun2socks"),
+                ("sing-box (эксперим.)", "singbox"),
+            ],
+            parent=paths_group,
+        )
+
         paths_group.addSettingCard(self.xray_path_card)
         paths_group.addSettingCard(self.singbox_path_card)
+        paths_group.addSettingCard(self.tun_engine_card)
         root.addWidget(paths_group)
 
         # ============================================================
@@ -336,6 +347,7 @@ class SettingsPage(QWidget):
         self.http_card.spin.valueChanged.connect(self._auto_save)
         self.xray_path_card.edit.editingFinished.connect(self._auto_save)
         self.singbox_path_card.edit.editingFinished.connect(self._auto_save)
+        self.tun_engine_card.combo.currentIndexChanged.connect(self._auto_save)
 
         self.start_min_card.checkedChanged.connect(self._auto_save)
         self.launch_card.checkedChanged.connect(self._auto_save)
@@ -375,6 +387,7 @@ class SettingsPage(QWidget):
                 migrate_default_location=True,
             )
         )
+        self._select_combo_data(self.tun_engine_card.combo, settings.tun_engine)
         self.start_min_card.setChecked(settings.start_minimized)
         self.launch_card.setChecked(settings.launch_on_startup)
         self.reconnect_card.setChecked(settings.reconnect_on_network_change)
@@ -461,6 +474,7 @@ class SettingsPage(QWidget):
         )
         self.xray_path_card.edit.setText(data.xray_path)
         self.singbox_path_card.edit.setText(data.singbox_path)
+        data.tun_engine = self.tun_engine_card.combo.currentData() or "tun2socks"
         data.start_minimized = self.start_min_card.isChecked()
         data.launch_on_startup = self.launch_card.isChecked()
         data.reconnect_on_network_change = self.reconnect_card.isChecked()

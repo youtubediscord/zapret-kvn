@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import os
-import socket
 from copy import deepcopy
 from ipaddress import ip_network
+from pathlib import Path
 from typing import Any
 
 from .constants import (
@@ -14,14 +14,8 @@ from .constants import (
     XRAY_STATS_API_PORT,
 )
 from .models import AppSettings, Node, RoutingSettings
-from .service_presets import SERVICE_PRESETS_BY_ID
 
-
-def _get_free_port() -> int:
-    """Ask the OS for a free TCP port on localhost."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+_XRAY_SOCKS_PORT = 11808
 
 
 def needs_xray_hybrid(node: Node) -> bool:
@@ -39,39 +33,27 @@ def build_singbox_config(
     node: Node,
     routing: RoutingSettings,
     settings: AppSettings,
-) -> tuple[dict[str, Any], int | None, int | None]:
-    """Build sing-box config.
-
-    Returns (config, relay_port, protect_port).
-    For native mode relay_port and protect_port are None.
-    """
+) -> dict[str, Any]:
     if needs_xray_hybrid(node):
-        relay_port = _get_free_port()
-        protect_port = _get_free_port()
-        cfg = _build_hybrid_config(node, routing, settings, relay_port, protect_port)
-        return cfg, relay_port, protect_port
-    return _build_native_config(node, routing, settings), None, None
+        return _build_hybrid_config(node, routing, settings)
+    return _build_native_config(node, routing, settings)
 
 
-def build_xray_relay_config(
+def build_xray_socks_config(
     node: Node,
     routing: RoutingSettings,
     settings: AppSettings,
-    relay_port: int,
-    protect_port: int,
 ) -> dict[str, Any]:
-    """Build xray config for hybrid TUN mode (v2rayN-style dialerProxy)."""
+    """Build xray config with SOCKS inbound for sing-box TUN hybrid mode."""
     from .config_builder import build_xray_config
     cfg = build_xray_config(node, routing, settings)
-
-    # --- Inbounds: SS relay + API ---
     cfg["inbounds"] = [
         {
-            "tag": "relay-in",
-            "protocol": "shadowsocks",
+            "tag": "socks-in",
+            "protocol": "socks",
             "listen": "127.0.0.1",
-            "port": relay_port,
-            "settings": {"method": "chacha20-ietf-poly1305", "password": "xftun-relay-bridge", "network": "tcp,udp"},
+            "port": _XRAY_SOCKS_PORT,
+            "settings": {"auth": "noauth", "udp": True},
             "sniffing": {
                 "enabled": True,
                 "destOverride": ["http", "tls", "quic"],
@@ -86,82 +68,46 @@ def build_xray_relay_config(
             "settings": {"address": PROXY_HOST},
         },
     ]
-
-    # --- Outbounds: inject dialerProxy + add tun-protect SS ---
-    _DIALER_PROXY_TAG = "tun-protect"
-
-    # Add dialerProxy to all outbounds except block and tun-protect itself
-    for ob in cfg["outbounds"]:
-        tag = ob.get("tag", "")
-        proto = ob.get("protocol", "")
-        if proto == "blackhole" or tag == _DIALER_PROXY_TAG:
-            continue
-        stream = ob.setdefault("streamSettings", {})
-        sockopt = stream.setdefault("sockopt", {})
-        sockopt["dialerProxy"] = _DIALER_PROXY_TAG
-
-    # Append tun-protect SS outbound (routes xray traffic back to sing-box → direct)
-    cfg["outbounds"].append({
-        "tag": _DIALER_PROXY_TAG,
-        "protocol": "shadowsocks",
-        "settings": {
-            "servers": [{
-                "address": "127.0.0.1",
-                "port": protect_port,
-                "method": "chacha20-ietf-poly1305",
-                "password": "xftun-relay-bridge",
-            }],
-        },
-    })
-
-    # Routing: no relay-in → proxy rule needed — the existing catch-all
-    # ("network": "tcp,udp" → proxy) handles unmatched traffic.
-    # Domain routing rules (steam → direct, youtube → proxy) apply to
-    # relay-in traffic thanks to xray sniffing.
-
     return cfg
 
 
 # ---------------------------------------------------------------------------
-# Hybrid config (sing-box TUN + xray via SS bridge + dialerProxy)
+# Hybrid: sing-box TUN + xray SOCKS (for xhttp transport)
 # ---------------------------------------------------------------------------
 
 def _build_hybrid_config(
     node: Node,
     routing: RoutingSettings,
     settings: AppSettings,
-    relay_port: int,
-    protect_port: int,
 ) -> dict[str, Any]:
-    """sing-box TUN config with SS bridge to xray (v2rayN-style architecture)."""
-    # SS outbound: sends captured traffic to xray's relay inbound
+    """sing-box TUN → SOCKS → xray. xray.exe bypassed by process_name."""
     proxy_outbound: dict[str, Any] = {
-        "type": "shadowsocks",
+        "type": "socks",
         "tag": "proxy",
         "server": "127.0.0.1",
-        "server_port": relay_port,
-        "method": "chacha20-ietf-poly1305",
-        "password": "xftun-relay-bridge",
+        "server_port": _XRAY_SOCKS_PORT,
+        "inet4_bind_address": "127.0.0.1",
     }
-
     direct_out: dict[str, Any] = {"type": "direct", "tag": "direct"}
     block_out: dict[str, Any] = {"type": "block", "tag": "block"}
 
-    outbounds = [proxy_outbound, direct_out, block_out]
-
     route_rules: list[dict[str, Any]] = []
 
-    # Sniff + DNS hijack (sing-box 1.13 rule actions)
     route_rules.append({"action": "sniff"})
     route_rules.append({"protocol": "dns", "action": "hijack-dns"})
 
-    # xray's dialerProxy traffic arrives on tun-protect inbound → must go direct
-    route_rules.append({"inbound": ["tun-protect"], "outbound": "direct"})
+    # Bypass xray.exe to prevent routing loop
+    xray_bin = Path(settings.xray_path).name if settings.xray_path else "xray.exe"
+    route_rules.append({"process_name": [xray_bin], "outbound": "direct"})
+
+    bypass_ips = ["127.0.0.0/8"]
+    if node.server:
+        bypass_ips.append(f"{node.server}/32")
+    route_rules.append({"ip_cidr": bypass_ips, "outbound": "direct"})
 
     if routing.bypass_lan:
         route_rules.append({"ip_is_private": True, "outbound": "direct"})
 
-    # Process-based routing (sing-box detects originating process via OS APIs)
     _append_process_rules(route_rules, routing)
 
     return {
@@ -173,30 +119,22 @@ def _build_hybrid_config(
                 "interface_name": f"xftun{os.getpid() % 10000}",
                 "address": ["172.19.0.1/30"],
                 "auto_route": True,
-                "strict_route": False,
+                "strict_route": True,
                 "stack": "mixed",
             },
-            {
-                "type": "shadowsocks",
-                "tag": "tun-protect",
-                "listen": "127.0.0.1",
-                "listen_port": protect_port,
-                "method": "chacha20-ietf-poly1305",
-                "password": "xftun-relay-bridge",
-            },
         ],
-        "outbounds": outbounds,
+        "outbounds": [proxy_outbound, direct_out, block_out],
         "route": {
             "auto_detect_interface": True,
             "rules": route_rules,
         },
         "dns": {
             "servers": [
-                # No detour — DNS goes through default outbound (proxy → xray).
-                # xray handles DNS routing via its own rules.
-                {"tag": "dns-out", "type": "udp", "server": "8.8.8.8"},
+                # TCP DNS through SOCKS proxy → xray (localhost, avoids TUN loop).
+                # Without detour, DNS packets go to TUN → hijack-dns → DNS module → loop.
+                {"tag": "proxy-dns", "type": "tcp", "server": "8.8.8.8", "detour": "proxy"},
             ],
-            "final": "dns-out",
+            "final": "proxy-dns",
         },
         "experimental": {
             "clash_api": {
@@ -207,7 +145,7 @@ def _build_hybrid_config(
 
 
 # ---------------------------------------------------------------------------
-# Native config (sing-box handles everything, no xray needed)
+# Native: sing-box handles everything (non-xhttp transports)
 # ---------------------------------------------------------------------------
 
 def _build_native_config(
@@ -221,8 +159,6 @@ def _build_native_config(
 
     direct_out: dict[str, Any] = {"type": "direct", "tag": "direct", "domain_resolver": "proxy-dns"}
     block_out: dict[str, Any] = {"type": "block", "tag": "block"}
-
-    outbounds = [proxy_outbound, direct_out, block_out]
 
     route_rules = _build_route_rules(routing, node)
 
@@ -239,7 +175,7 @@ def _build_native_config(
                 "stack": "mixed",
             },
         ],
-        "outbounds": outbounds,
+        "outbounds": [proxy_outbound, direct_out, block_out],
         "route": {
             "auto_detect_interface": True,
             "default_domain_resolver": "proxy-dns",
@@ -260,7 +196,7 @@ def _build_native_config(
 
 
 # ---------------------------------------------------------------------------
-# Outbound conversion (xray → sing-box format, for native mode)
+# Outbound conversion (xray → sing-box format)
 # ---------------------------------------------------------------------------
 
 def _convert_outbound(xray_ob: dict[str, Any]) -> dict[str, Any]:
@@ -387,7 +323,7 @@ def _apply_transport(sb: dict[str, Any], stream: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Routing rules (for native sing-box mode)
+# Routing rules (for native mode)
 # ---------------------------------------------------------------------------
 
 def _build_route_rules(routing: RoutingSettings, node: Node) -> list[dict[str, Any]]:
