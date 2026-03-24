@@ -43,3 +43,6 @@ SPEED_TEST_TIMEOUT = 20  # seconds per single measurement
 SPEED_TEST_ROUNDS = 3    # number of measurements per node (best avg of N-1)
 SPEED_TEST_TEMP_SOCKS_PORT = 19100
 SPEED_TEST_TEMP_HTTP_PORT = 19101
+
+SS_PROTECT_PORT_START = 19200
+SS_PROTECT_PORT_END = 19300

@@ -94,6 +94,7 @@ class RoutingSettings:
     dns_mode: str = "system"  # system | builtin
     process_rules: list[dict[str, str]] = field(default_factory=list)  # [{"process": "chrome.exe", "action": "direct|proxy|block"}]
     service_routes: dict[str, str] = field(default_factory=dict)  # {"youtube": "proxy", "steam": "direct", ...}
+    tun_default_outbound: str = "proxy"  # "proxy" | "direct"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -105,6 +106,7 @@ class RoutingSettings:
             "dns_mode": self.dns_mode,
             "process_rules": list(self.process_rules),
             "service_routes": dict(self.service_routes),
+            "tun_default_outbound": self.tun_default_outbound,
         }
 
     @staticmethod
@@ -118,6 +120,7 @@ class RoutingSettings:
             dns_mode=str(data.get("dns_mode") or "system"),
             process_rules=list(data.get("process_rules") or []),
             service_routes=dict(data.get("service_routes") or {}),
+            tun_default_outbound=str(data.get("tun_default_outbound") or "proxy"),
         )
 
 

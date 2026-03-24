@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import os
+import secrets
+import socket
+import string
 from copy import deepcopy
+from dataclasses import dataclass
 from ipaddress import ip_network
 from pathlib import Path
 from typing import Any
@@ -11,11 +15,42 @@ from .constants import (
     ROUTING_DIRECT,
     ROUTING_GLOBAL,
     SINGBOX_CLASH_API_PORT,
+    SS_PROTECT_PORT_START,
+    SS_PROTECT_PORT_END,
     XRAY_STATS_API_PORT,
 )
 from .models import AppSettings, Node, RoutingSettings
+from .service_presets import SERVICE_PRESETS_BY_ID
 
 _XRAY_SOCKS_PORT = 11808
+_SS_PROTECT_METHOD = "chacha20-ietf-poly1305"
+
+_PROTECTED_PROCESSES = {"xray.exe", "sing-box.exe", "tun2socks.exe"}
+
+
+def _find_free_port(start: int = SS_PROTECT_PORT_START, end: int = SS_PROTECT_PORT_END) -> int:
+    for port in range(start, end):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+    raise RuntimeError(f"No free port in range {start}-{end}")
+
+
+def _generate_ss_password(length: int = 24) -> str:
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+
+@dataclass
+class TunConfigBundle:
+    singbox_config: dict[str, Any]
+    xray_config: dict[str, Any] | None  # None for native mode
+    is_hybrid: bool
+    protect_port: int = 0
+    protect_password: str = ""
 
 
 def needs_xray_hybrid(node: Node) -> bool:
@@ -33,20 +68,174 @@ def build_singbox_config(
     node: Node,
     routing: RoutingSettings,
     settings: AppSettings,
-) -> dict[str, Any]:
+    protect_port: int = 0,
+    protect_password: str = "",
+) -> TunConfigBundle:
     if needs_xray_hybrid(node):
-        return _build_hybrid_config(node, routing, settings)
+        return _build_hybrid_config(node, routing, settings, protect_port, protect_password)
     return _build_native_config(node, routing, settings)
 
 
-def build_xray_socks_config(
+def build_xray_hybrid_config(
+    node: Node, routing: RoutingSettings, settings: AppSettings,
+    protect_port: int, protect_password: str,
+) -> dict[str, Any]:
+    """Public wrapper for hot-swap: rebuild only xray config with existing protect params."""
+    return _build_xray_hybrid_config(node, routing, settings, protect_port, protect_password)
+
+
+# ---------------------------------------------------------------------------
+# Protected process rules
+# ---------------------------------------------------------------------------
+
+def _append_protected_process_rules(rules: list[dict[str, Any]], settings: AppSettings) -> None:
+    protected = list(_PROTECTED_PROCESSES)
+    if settings.xray_path:
+        protected.append(Path(settings.xray_path).name)
+    if settings.singbox_path:
+        protected.append(Path(settings.singbox_path).name)
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for p in protected:
+        low = p.lower()
+        if low not in seen:
+            seen.add(low)
+            deduped.append(low)
+    rules.append({"process_name": deduped, "outbound": "direct"})
+
+
+# ---------------------------------------------------------------------------
+# Hybrid: sing-box TUN + xray SOCKS (dialerProxy architecture)
+# ---------------------------------------------------------------------------
+
+def _build_hybrid_config(
     node: Node,
     routing: RoutingSettings,
     settings: AppSettings,
+    protect_port: int = 0,
+    protect_password: str = "",
+) -> TunConfigBundle:
+    if not protect_port:
+        protect_port = _find_free_port()
+    if not protect_password:
+        protect_password = _generate_ss_password()
+
+    singbox_cfg = _build_hybrid_singbox_config(node, routing, settings, protect_port, protect_password)
+    xray_cfg = _build_xray_hybrid_config(node, routing, settings, protect_port, protect_password)
+
+    return TunConfigBundle(
+        singbox_config=singbox_cfg,
+        xray_config=xray_cfg,
+        is_hybrid=True,
+        protect_port=protect_port,
+        protect_password=protect_password,
+    )
+
+
+def _build_hybrid_singbox_config(
+    node: Node,
+    routing: RoutingSettings,
+    settings: AppSettings,
+    protect_port: int,
+    protect_password: str,
 ) -> dict[str, Any]:
-    """Build xray config with SOCKS inbound for sing-box TUN hybrid mode."""
+    """sing-box config for hybrid mode: TUN + SS protect inbound + relay to xray SOCKS."""
+    relay_outbound: dict[str, Any] = {
+        "type": "socks",
+        "tag": "proxy",
+        "server": "127.0.0.1",
+        "server_port": _XRAY_SOCKS_PORT,
+        "inet4_bind_address": "127.0.0.1",
+    }
+    direct_out: dict[str, Any] = {"type": "direct", "tag": "direct", "domain_resolver": "bootstrap-dns"}
+    block_out: dict[str, Any] = {"type": "block", "tag": "block"}
+
+    route_rules: list[dict[str, Any]] = []
+
+    route_rules.append({"action": "sniff"})
+    route_rules.append({"protocol": "dns", "action": "hijack-dns"})
+
+    # Protected processes bypass TUN
+    _append_protected_process_rules(route_rules, settings)
+
+    # SS protect inbound → direct (loopback traffic from xray dialerProxy)
+    route_rules.append({"inbound": ["tun-protect"], "outbound": "direct"})
+
+    # Bypass LAN
+    if routing.bypass_lan:
+        route_rules.append({"ip_is_private": True, "outbound": "direct"})
+
+    # Service routes
+    for svc_id, action in routing.service_routes.items():
+        preset = SERVICE_PRESETS_BY_ID.get(svc_id)
+        if preset:
+            _append_singbox_rules(route_rules, list(preset.domains), action)
+
+    # Domain rules
+    _append_singbox_rules(route_rules, routing.direct_domains, "direct")
+    _append_singbox_rules(route_rules, routing.block_domains, "block")
+    _append_singbox_rules(route_rules, routing.proxy_domains, "proxy")
+
+    # Process rules
+    _append_process_rules(route_rules, routing)
+
+    # Default outbound for TUN
+    final_outbound = "proxy"
+    if routing.tun_default_outbound == "direct":
+        route_rules.append({"inbound": ["tun-in"], "outbound": "direct"})
+
+    return {
+        "log": {"level": "warn", "timestamp": True},
+        "inbounds": [
+            {
+                "type": "tun",
+                "tag": "tun-in",
+                "interface_name": f"xftun{os.getpid() % 10000}",
+                "address": ["172.19.0.1/30"],
+                "auto_route": True,
+                "strict_route": True,
+                "stack": "mixed",
+            },
+            {
+                "type": "shadowsocks",
+                "tag": "tun-protect",
+                "listen": "127.0.0.1",
+                "listen_port": protect_port,
+                "method": _SS_PROTECT_METHOD,
+                "password": protect_password,
+            },
+        ],
+        "outbounds": [relay_outbound, direct_out, block_out],
+        "route": {
+            "auto_detect_interface": True,
+            "default_domain_resolver": "proxy-dns",
+            "final": final_outbound,
+            "rules": route_rules,
+        },
+        "dns": {
+            "servers": [
+                {"tag": "bootstrap-dns", "type": "udp", "server": "1.1.1.1"},
+                {"tag": "proxy-dns", "type": "tcp", "server": "8.8.8.8", "detour": "proxy"},
+            ],
+            "final": "proxy-dns",
+        },
+        "experimental": {
+            "clash_api": {
+                "external_controller": f"127.0.0.1:{SINGBOX_CLASH_API_PORT}",
+            },
+        },
+    }
+
+
+def _build_xray_hybrid_config(
+    node: Node, routing: RoutingSettings, settings: AppSettings,
+    protect_port: int, protect_password: str,
+) -> dict[str, Any]:
+    """Build xray config for hybrid mode: SOCKS inbound + dialerProxy to SS protect."""
     from .config_builder import build_xray_config
     cfg = build_xray_config(node, routing, settings)
+
+    # Replace inbounds: SOCKS + API only
     cfg["inbounds"] = [
         {
             "tag": "socks-in",
@@ -68,80 +257,29 @@ def build_xray_socks_config(
             "settings": {"address": PROXY_HOST},
         },
     ]
+
+    # Add dialerProxy to the proxy outbound
+    for ob in cfg.get("outbounds", []):
+        if ob.get("tag") == "proxy":
+            ob.setdefault("streamSettings", {}).setdefault("sockopt", {})["dialerProxy"] = "tun-protect-out"
+            break
+
+    # Add SS protect outbound
+    ss_protect = {
+        "tag": "tun-protect-out",
+        "protocol": "shadowsocks",
+        "settings": {
+            "servers": [{
+                "address": "127.0.0.1",
+                "port": protect_port,
+                "method": _SS_PROTECT_METHOD,
+                "password": protect_password,
+            }]
+        },
+    }
+    cfg["outbounds"].append(ss_protect)
+
     return cfg
-
-
-# ---------------------------------------------------------------------------
-# Hybrid: sing-box TUN + xray SOCKS (for xhttp transport)
-# ---------------------------------------------------------------------------
-
-def _build_hybrid_config(
-    node: Node,
-    routing: RoutingSettings,
-    settings: AppSettings,
-) -> dict[str, Any]:
-    """sing-box TUN → SOCKS → xray. xray.exe bypassed by process_name."""
-    proxy_outbound: dict[str, Any] = {
-        "type": "socks",
-        "tag": "proxy",
-        "server": "127.0.0.1",
-        "server_port": _XRAY_SOCKS_PORT,
-        "inet4_bind_address": "127.0.0.1",
-    }
-    direct_out: dict[str, Any] = {"type": "direct", "tag": "direct"}
-    block_out: dict[str, Any] = {"type": "block", "tag": "block"}
-
-    route_rules: list[dict[str, Any]] = []
-
-    route_rules.append({"action": "sniff"})
-    route_rules.append({"protocol": "dns", "action": "hijack-dns"})
-
-    # Bypass xray.exe to prevent routing loop
-    xray_bin = Path(settings.xray_path).name if settings.xray_path else "xray.exe"
-    route_rules.append({"process_name": [xray_bin], "outbound": "direct"})
-
-    bypass_ips = ["127.0.0.0/8"]
-    if node.server:
-        bypass_ips.append(f"{node.server}/32")
-    route_rules.append({"ip_cidr": bypass_ips, "outbound": "direct"})
-
-    if routing.bypass_lan:
-        route_rules.append({"ip_is_private": True, "outbound": "direct"})
-
-    _append_process_rules(route_rules, routing)
-
-    return {
-        "log": {"level": "warn", "timestamp": True},
-        "inbounds": [
-            {
-                "type": "tun",
-                "tag": "tun-in",
-                "interface_name": f"xftun{os.getpid() % 10000}",
-                "address": ["172.19.0.1/30"],
-                "auto_route": True,
-                "strict_route": True,
-                "stack": "mixed",
-            },
-        ],
-        "outbounds": [proxy_outbound, direct_out, block_out],
-        "route": {
-            "auto_detect_interface": True,
-            "rules": route_rules,
-        },
-        "dns": {
-            "servers": [
-                # TCP DNS through SOCKS proxy → xray (localhost, avoids TUN loop).
-                # Without detour, DNS packets go to TUN → hijack-dns → DNS module → loop.
-                {"tag": "proxy-dns", "type": "tcp", "server": "8.8.8.8", "detour": "proxy"},
-            ],
-            "final": "proxy-dns",
-        },
-        "experimental": {
-            "clash_api": {
-                "external_controller": f"127.0.0.1:{SINGBOX_CLASH_API_PORT}",
-            },
-        },
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -152,17 +290,17 @@ def _build_native_config(
     node: Node,
     routing: RoutingSettings,
     settings: AppSettings,
-) -> dict[str, Any]:
+) -> TunConfigBundle:
     proxy_outbound = _convert_outbound(deepcopy(node.outbound))
     proxy_outbound["tag"] = "proxy"
     proxy_outbound["domain_resolver"] = "proxy-dns"
 
-    direct_out: dict[str, Any] = {"type": "direct", "tag": "direct", "domain_resolver": "proxy-dns"}
+    direct_out: dict[str, Any] = {"type": "direct", "tag": "direct", "domain_resolver": "bootstrap-dns"}
     block_out: dict[str, Any] = {"type": "block", "tag": "block"}
 
-    route_rules = _build_route_rules(routing, node)
+    route_rules = _build_route_rules(routing, node, settings)
 
-    return {
+    singbox_cfg: dict[str, Any] = {
         "log": {"level": "warn", "timestamp": True},
         "inbounds": [
             {
@@ -183,6 +321,7 @@ def _build_native_config(
         },
         "dns": {
             "servers": [
+                {"tag": "bootstrap-dns", "type": "udp", "server": "1.1.1.1"},
                 {"tag": "proxy-dns", "type": "https", "server": "1.1.1.1", "detour": "proxy"},
             ],
             "final": "proxy-dns",
@@ -194,9 +333,11 @@ def _build_native_config(
         },
     }
 
+    return TunConfigBundle(singbox_config=singbox_cfg, xray_config=None, is_hybrid=False)
+
 
 # ---------------------------------------------------------------------------
-# Outbound conversion (xray → sing-box format)
+# Outbound conversion (xray -> sing-box format)
 # ---------------------------------------------------------------------------
 
 def _convert_outbound(xray_ob: dict[str, Any]) -> dict[str, Any]:
@@ -326,19 +467,29 @@ def _apply_transport(sb: dict[str, Any], stream: dict[str, Any]) -> None:
 # Routing rules (for native mode)
 # ---------------------------------------------------------------------------
 
-def _build_route_rules(routing: RoutingSettings, node: Node) -> list[dict[str, Any]]:
+def _build_route_rules(routing: RoutingSettings, node: Node, settings: AppSettings) -> list[dict[str, Any]]:
     rules: list[dict[str, Any]] = []
 
     rules.append({"action": "sniff"})
     rules.append({"protocol": "dns", "action": "hijack-dns"})
 
-    bypass_ips = ["8.8.8.8/32", "8.8.4.4/32", "1.1.1.1/32"]
+    # Protected processes bypass TUN
+    _append_protected_process_rules(rules, settings)
+
+    bypass_ips: list[str] = []
     if node.server:
         bypass_ips.append(f"{node.server}/32")
-    rules.append({"ip_cidr": bypass_ips, "outbound": "direct"})
+    if bypass_ips:
+        rules.append({"ip_cidr": bypass_ips, "outbound": "direct"})
 
     if routing.bypass_lan:
         rules.append({"ip_is_private": True, "outbound": "direct"})
+
+    # Service routes
+    for svc_id, action in routing.service_routes.items():
+        preset = SERVICE_PRESETS_BY_ID.get(svc_id)
+        if preset:
+            _append_singbox_rules(rules, list(preset.domains), action)
 
     _append_singbox_rules(rules, routing.direct_domains, "direct")
     _append_singbox_rules(rules, routing.block_domains, "block")
@@ -346,8 +497,8 @@ def _build_route_rules(routing: RoutingSettings, node: Node) -> list[dict[str, A
 
     _append_process_rules(rules, routing)
 
-    mode = routing.mode
-    if mode == ROUTING_DIRECT:
+    # Default outbound for TUN
+    if routing.tun_default_outbound == "direct":
         rules.append({"inbound": ["tun-in"], "outbound": "direct"})
 
     return rules

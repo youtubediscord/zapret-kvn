@@ -205,6 +205,32 @@ class RoutingPage(QWidget):
         )
         root.addWidget(self.process_info)
 
+        # TUN default outbound selector
+        tun_default_row = QHBoxLayout()
+        self._tun_default_label = BodyLabel("По умолчанию (TUN):", container)
+        tun_default_row.addWidget(self._tun_default_label)
+        self.tun_default_combo = ComboBox(container)
+        self.tun_default_combo.addItem("Через прокси", userData="proxy")
+        self.tun_default_combo.addItem("Напрямую", userData="direct")
+        self.tun_default_combo.setMinimumWidth(160)
+        tun_default_row.addWidget(self.tun_default_combo)
+        tun_default_row.addStretch(1)
+        self._tun_default_row_widget = QWidget(container)
+        self._tun_default_row_widget.setLayout(tun_default_row)
+        root.addWidget(self._tun_default_row_widget)
+
+        self.tun_default_info = CaptionLabel(
+            "Что делать с трафиком процессов, не указанных в таблице ниже. "
+            "«Через прокси» — весь трафик через VPN, исключения идут напрямую. "
+            "«Напрямую» — только указанные процессы идут через VPN.",
+            container,
+        )
+        root.addWidget(self.tun_default_info)
+
+        # Hidden by default — shown only in TUN mode
+        self._tun_default_row_widget.setVisible(False)
+        self.tun_default_info.setVisible(False)
+
         self._process_container = QWidget(container)
         proc_layout = QVBoxLayout(self._process_container)
         proc_layout.setContentsMargins(0, 0, 0, 0)
@@ -248,6 +274,7 @@ class RoutingPage(QWidget):
         self.mode_combo.currentIndexChanged.connect(self._schedule_apply)
         self.dns_combo.currentIndexChanged.connect(self._schedule_apply)
         self.bypass_switch.checkedChanged.connect(self._schedule_apply)
+        self.tun_default_combo.currentIndexChanged.connect(self._schedule_apply)
         self.add_rule_btn.clicked.connect(self._on_add_rule)
         self.del_rule_btn.clicked.connect(self._on_del_rules)
         self.import_btn.clicked.connect(self._on_import_rules)
@@ -269,6 +296,7 @@ class RoutingPage(QWidget):
         self._select_combo_value(self.mode_combo, routing.mode)
         self._select_combo_value(self.dns_combo, routing.dns_mode)
         self.bypass_switch.setChecked(routing.bypass_lan)
+        self._select_combo_value(self.tun_default_combo, routing.tun_default_outbound)
 
         # Populate service cards
         use_defaults = not routing.service_routes
@@ -320,6 +348,9 @@ class RoutingPage(QWidget):
         self.add_proc_btn.setEnabled(True)
         self.del_proc_btn.setEnabled(True)
         self.proxy_warning.setVisible(not enabled)
+        # TUN default outbound only relevant in TUN mode
+        self._tun_default_row_widget.setVisible(enabled)
+        self.tun_default_info.setVisible(enabled)
 
     # --- Rules table helpers ---
 
@@ -410,6 +441,8 @@ class RoutingPage(QWidget):
         combo.currentIndexChanged.connect(self._schedule_apply)
         self.proc_table.setCellWidget(row, 1, combo)
 
+    _PROTECTED_PROCESSES = {"xray.exe", "sing-box.exe", "tun2socks.exe"}
+
     def _on_browse_exe(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Выбрать приложение", "", "Executables (*.exe)"
@@ -417,6 +450,16 @@ class RoutingPage(QWidget):
         if not path:
             return
         name = os.path.basename(path)
+        if name.lower() in self._PROTECTED_PROCESSES:
+            from qfluentwidgets import InfoBar, InfoBarPosition
+            InfoBar.warning(
+                title="Защищённый процесс",
+                content=f"{name} всегда использует прямое подключение для предотвращения петли маршрутизации",
+                parent=self,
+                duration=4000,
+                position=InfoBarPosition.TOP,
+            )
+            return
         for row in range(self.proc_table.rowCount()):
             item = self.proc_table.item(row, 0)
             if item and item.text().lower() == name.lower():
@@ -476,6 +519,8 @@ class RoutingPage(QWidget):
             if enabled:
                 service_routes[svc_id] = action
 
+        tun_default_outbound = self.tun_default_combo.currentData() or "proxy"
+
         routing = RoutingSettings(
             mode=str(mode),
             bypass_lan=self.bypass_switch.isChecked(),
@@ -485,6 +530,7 @@ class RoutingPage(QWidget):
             dns_mode=str(dns_mode),
             process_rules=process_rules,
             service_routes=service_routes,
+            tun_default_outbound=str(tun_default_outbound),
         )
         self.apply_requested.emit(routing)
 

@@ -10,7 +10,7 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from .country_flags import CountryResolver, detect_country
 from .config_builder import build_xray_config
-from .singbox_config_builder import build_singbox_config, build_xray_socks_config, needs_xray_hybrid
+from .singbox_config_builder import build_singbox_config, build_xray_hybrid_config, needs_xray_hybrid, TunConfigBundle
 from .connectivity_test import ConnectivityTestWorker
 from .constants import APP_NAME, LOG_DIR, ROUTING_MODES, SINGBOX_CLASH_API_PORT, XRAY_STATS_API_PORT
 from .diagnostics import export_diagnostics
@@ -87,6 +87,8 @@ class AppController(QObject):
         self._reconnecting = False
         self._switching = False  # suppress intermediate UI updates during stop→start
         self._active_core: str = "xray"  # "xray" | "singbox" | "tun2socks"
+        self._protect_ss_port: int = 0
+        self._protect_ss_password: str = ""
 
         self.xray.log_received.connect(self._on_xray_log)
         self.xray.error.connect(self._on_xray_error)
@@ -437,10 +439,11 @@ class AppController(QObject):
 
             if engine == "singbox":
                 # --- sing-box TUN (experimental, supports process routing) ---
-                hybrid = needs_xray_hybrid(node)
-                if hybrid:
-                    self.status.emit("info", "Запуск Xray (SOCKS)...")
-                    xray_cfg = build_xray_socks_config(node, self.state.routing, self.state.settings)
+                bundle = build_singbox_config(node, self.state.routing, self.state.settings)
+
+                if bundle.is_hybrid:
+                    self.status.emit("info", "Запуск Xray (dialerProxy)...")
+                    xray_cfg = bundle.xray_config
                     xray_cfg["log"] = {"loglevel": "error"}
                     xray_ok = self.xray.start(self.state.settings.xray_path, xray_cfg)
                     if not xray_ok:
@@ -449,16 +452,17 @@ class AppController(QObject):
                         return False
                     self.status.emit("info", "Xray запущен. Создание TUN адаптера...")
 
-                sb_cfg = build_singbox_config(node, self.state.routing, self.state.settings)
-                self._log(f"[tun] starting sing-box TUN (hybrid={hybrid})")
-                sb_ok = self.singbox.start(self.state.settings.singbox_path, sb_cfg)
+                self._log(f"[tun] starting sing-box TUN (hybrid={bundle.is_hybrid})")
+                sb_ok = self.singbox.start(self.state.settings.singbox_path, bundle.singbox_config)
                 self._log(f"[tun] sing-box start result: {sb_ok}")
                 if not sb_ok:
-                    if hybrid:
+                    if bundle.is_hybrid:
                         self.xray.stop()
                     self.status.emit("error", "Не удалось создать TUN адаптер. Проверьте наличие wintun.dll в core/.")
                     return False
                 self._active_core = "singbox"
+                self._protect_ss_port = bundle.protect_port
+                self._protect_ss_password = bundle.protect_password
             else:
                 # --- tun2socks TUN (stable, default) ---
                 config = build_xray_config(node, self.state.routing, self.state.settings)
@@ -505,6 +509,8 @@ class AppController(QObject):
             stopped = self.singbox.stop()
             if self.xray.is_running:
                 self.xray.stop()
+            self._protect_ss_port = 0
+            self._protect_ss_password = ""
         elif self._active_core == "tun2socks":
             if emit_status:
                 self.status.emit("info", "Остановка VPN...")
@@ -796,7 +802,12 @@ class AppController(QObject):
         self.status.emit("error", message)
 
     def _on_core_state_changed(self, running: bool) -> None:
-        self.connected = running
+        if self._active_core == "singbox":
+            self.connected = self.singbox.is_running
+        elif self._active_core == "tun2socks":
+            self.connected = self.tun2socks.is_running
+        else:
+            self.connected = running
         # Suppress intermediate connection_changed signals during hot-swap/reconnect
         if not self._switching:
             self.connection_changed.emit(running)
@@ -937,7 +948,7 @@ class AppController(QObject):
                 self._log(f"[hot-swap] {reason} — restarting xray only, sing-box TUN stays up")
                 self.status.emit("info", f"Переключение на {node.name}...")
                 self.xray.stop()
-                xray_cfg = build_xray_socks_config(node, self.state.routing, self.state.settings)
+                xray_cfg = build_xray_hybrid_config(node, self.state.routing, self.state.settings, self._protect_ss_port, self._protect_ss_password)
                 xray_cfg["log"] = {"loglevel": "error"}
                 ok = self.xray.start(self.state.settings.xray_path, xray_cfg)
                 if ok:

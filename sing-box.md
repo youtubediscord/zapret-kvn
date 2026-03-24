@@ -97,16 +97,140 @@ xray outbound → dialerProxy → SS:PORT_B → sing-box tun-protect → direct
 | Совместимость с xhttp | Хорошая (прямой SOCKS) | Проблемная (double-proxy) |
 | Настройка | Простая | Сложная (много подводных камней) |
 
-## Рекомендация
+### Попытка 5: dialerProxy с sing-box 1.14.0-alpha.5 (2026-03-24)
+
+**Предпосылки:**
+- Анализ исходного кода v2rayN показал архитектуру "protect SS канала" через `dialerProxy`
+- Скачан sing-box 1.14.0-alpha.5 (pre-built binary)
+- Цель: проверить исправлен ли баг SS inbound → direct outbound (не работал на 1.13.3)
+
+**Архитектура v2rayN (эталон):**
+```
+App → TUN (sing-box) → relay outbound → xray SOCKS inbound
+xray → proxy outbound → dialerProxy → "tun-protect-out" SS outbound → sing-box SS inbound → direct → internet
+process_name: [xray.exe, sing-box.exe] → direct (защита от routing loop)
+```
+
+**Тест 1: SS inbound → direct outbound (chacha20-ietf-poly1305)**
+
+Конфиг sing-box:
+```json
+{
+  "inbounds": [
+    {"type": "tun", "tag": "tun-in", "interface_name": "test_tun",
+     "address": ["172.19.0.1/30"], "auto_route": true, "strict_route": true, "stack": "mixed"},
+    {"type": "shadowsocks", "tag": "tun-protect", "listen": "127.0.0.1",
+     "listen_port": 19200, "method": "chacha20-ietf-poly1305", "password": "testpassword123"}
+  ],
+  "outbounds": [{"type": "direct", "tag": "direct"}],
+  "route": {
+    "auto_detect_interface": true,
+    "rules": [
+      {"action": "sniff"},
+      {"process_name": ["sing-box.exe"], "outbound": "direct"},
+      {"inbound": ["tun-protect"], "outbound": "direct"},
+      {"ip_is_private": true, "outbound": "direct"}
+    ]
+  }
+}
+```
+
+Конфиг xray (SS outbound → sing-box SS inbound):
+```json
+{
+  "inbounds": [{"protocol": "socks", "listen": "127.0.0.1", "port": 11808,
+    "settings": {"auth": "noauth", "udp": true}}],
+  "outbounds": [{"protocol": "shadowsocks", "settings": {"servers": [
+    {"address": "127.0.0.1", "port": 19200, "method": "chacha20-ietf-poly1305", "password": "testpassword123"}
+  ]}}]
+}
+```
+
+Тест:
+```bash
+curl -x socks5h://127.0.0.1:11808 http://httpbin.org/ip
+# Результат: {"origin": "109.252.184.208"}
+```
+
+**РЕЗУЛЬТАТ: ✅ РАБОТАЕТ!** SS inbound → direct outbound на sing-box 1.14.0-alpha.5 **исправлен**.
+IP 109.252.184.208 — реальный IP провайдера (не proxy), трафик выходит через physical NIC минуя TUN.
+
+**Тест 2: method:none совместимость (xray 26.2 ↔ sing-box 1.14)**
+
+Тот же тест, но с `"method": "none", "password": ""` на обеих сторонах.
+
+```bash
+curl -x socks5h://127.0.0.1:11808 http://httpbin.org/ip
+# Результат: curl: (7) Failed to connect to httpbin.org port 80 via 127.0.0.1 after 2036 ms
+```
+
+**РЕЗУЛЬТАТ: ❌ НЕ РАБОТАЕТ.** Баг `method:none` между xray и sing-box по-прежнему присутствует.
+Тот же симптом что в Попытке 3 — xray отправляет пакет, sing-box не может его прочитать.
+
+**Вывод:**
+- **Баг direct outbound для inbound-initiated трафика ИСПРАВЛЕН в sing-box 1.14** (не работал на 1.13.3)
+- `method:none` по-прежнему сломан между xray и sing-box — используем `chacha20-ietf-poly1305`
+- Overhead шифрования на localhost пренебрежимо мал
+- Архитектура v2rayN с dialerProxy + protect SS каналом теперь реализуема
+
+**Тест 3: интеграция в приложение — первый запуск**
+
+Ошибка sing-box 1.14 при старте:
+```
+FATAL: outbound DNS rule item is deprecated in sing-box 1.12.0 and will be removed in sing-box 1.14.0
+```
+
+**Причина:** DNS rule `{"outbound": ["direct"], "server": "bootstrap-dns"}` — deprecated в 1.12, удалён в 1.14.
+Этот формат позволял назначить DNS сервер для outbound'а через DNS rules. В 1.14 нужно использовать `domain_resolver` прямо на outbound'е.
+
+**Фикс:**
+```diff
+- "dns": { "rules": [{"outbound": ["direct"], "server": "bootstrap-dns"}] }
++ // Вместо DNS rule — field на самом outbound:
++ direct_out = {"type": "direct", "tag": "direct", "domain_resolver": "bootstrap-dns"}
++ // + default_domain_resolver в route:
++ "route": { "default_domain_resolver": "proxy-dns", ... }
+```
+
+**ВАЖНО для совместимости с sing-box 1.14+:**
+- НЕ использовать `outbound` как match condition в DNS rules
+- Использовать `domain_resolver` field на outbound'ах
+- Использовать `default_domain_resolver` в route config
+
+**Тест 4: полная интеграция в приложение (после фиксов)**
+
+После исправления 3 багов:
+1. `outbound` DNS rule → заменён на `domain_resolver` на outbound'ах
+2. outbound tag `relay` → `proxy` (совпадает с routing rules)
+3. Убран debug лог
+
+**РЕЗУЛЬТАТ: ✅ РАБОТАЕТ!** Полная цепочка dialerProxy подтверждена:
+- `outbound/socks[proxy]` — весь трафик приложений идёт через proxy
+- protect канал: `tun-protect → 46.17.101.82:30443 → direct` — xray достигает VPS
+- TLS sniff: определяет домены из SNI → domain routing работает
+- DNS hijack: перехватывает DNS → proxy-dns через TCP
+- QUIC sniff: определяет QUIC → routing по доменам
+- Telegram (AyuGram.exe): подключается через proxy, сообщения ходят
+
+**Ключевые баги при интеграции:**
+1. `outbound` DNS rule deprecated в sing-box 1.12, удалён в 1.14 → FATAL при старте
+2. outbound tag mismatch: routing rules генерируют `outbound: "proxy"`, а outbound назывался `"relay"` → `outbound not found: proxy`
+3. Google service routes (`google.com → direct`) потенциально перехватывают Telegram MTProto (фейковый TLS SNI с google.com доменом)
+
+---
+
+## Рекомендация (обновлено 2026-03-24)
 
 1. **tun2socks по умолчанию** — стабильный, проверенный, работает с xhttp
-2. **sing-box TUN как экспериментальная опция** — для process routing, требует доработки
-3. Для sing-box TUN с xhttp нужна рабочая реализация dialerProxy или исправление direct outbound в будущих версиях sing-box
+2. **sing-box TUN с dialerProxy** — теперь рабочий на sing-box ≥ 1.14, поддерживает process routing
+3. Обязательно: sing-box 1.14+ (1.13.3 имеет баг direct outbound для inbound-initiated трафика)
+4. Protect канал: `chacha20-ietf-poly1305` (method:none сломан между xray и sing-box)
+5. **НЕ использовать** `outbound` DNS rule items — deprecated в 1.12, удалены в 1.14. Вместо этого: `domain_resolver` на outbound'ах
 
 ## Тестовая среда
 
 - Windows 10 IoT Enterprise LTSC 2021 (build 19044)
 - xray-core 26.2.6
-- sing-box 1.13.3
+- sing-box 1.13.3 → **1.14.0-alpha.5** (обновлено)
 - Транспорт: VLESS + xhttp + Reality
 - Прокси сервер: 46.17.101.82:30443
