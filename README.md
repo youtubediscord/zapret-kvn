@@ -2,7 +2,8 @@
 
 Простой VPN-клиент для Windows с обходом блокировок. Работает из коробки.
 
-<img width="1276" height="873" alt="image" src="https://github.com/user-attachments/assets/089ae538-686f-4b6d-94f6-c0ff56bd3664" />
+<img width="400" alt="image" src="https://github.com/user-attachments/assets/089ae538-686f-4b6d-94f6-c0ff56bd3664" /><img width="400" alt="image" src="https://github.com/user-attachments/assets/f144c777-d60c-440b-bc29-39285d588ac6" />
+
 
 > [!WARNING]
 > Первая бета-версия. Некоторый функционал может работать некорректно.
