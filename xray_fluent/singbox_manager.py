@@ -67,6 +67,9 @@ class SingBoxManager(QObject):
         # Kill any orphaned sing-box processes to free the TUN adapter
         self._kill_orphaned(exe)
 
+        # Ensure TUN adapter is released before starting
+        self._wait_tun_released()
+
         # Set working directory to core/ so sing-box can find wintun.dll
         core_dir = exe.parent
 
@@ -81,14 +84,14 @@ class SingBoxManager(QObject):
                 self.error.emit(f"failed to start sing-box process: {self._process.errorString()}")
                 return False
 
-            # TUN adapter creation can take several seconds
+            # TUN adapter creation can take several seconds — wait for output
             self._process.waitForReadyRead(5000)
-            # Give extra time for potential FATAL errors
-            time.sleep(0.5)
+            # Brief pause to let FATAL errors surface
+            time.sleep(0.3)
             if self._process.state() == QProcess.ProcessState.NotRunning:
-                # Check if it was "file already exists" — retry after pause
+                # "file already exists" — wait for TUN release and retry
                 if attempt < 2:
-                    time.sleep(3)
+                    self._wait_tun_released()
                     continue
                 self.error.emit("sing-box process exited right after start")
                 return False
@@ -124,21 +127,40 @@ class SingBoxManager(QObject):
 
         self._stop_requested = expected
         self._process.terminate()
-        if self._process.waitForFinished(3000):
-            time.sleep(1)  # give OS time to release TUN adapter
-            return True
+        if not self._process.waitForFinished(3000):
+            self._process.kill()
+            self._process.waitForFinished(2000)
 
-        self._process.kill()
-        if self._process.waitForFinished(2000):
-            time.sleep(1)
-            return True
+        if self._process.state() != QProcess.ProcessState.NotRunning:
+            self._stop_requested = False
+            self.error.emit("failed to stop sing-box process in time")
+            return False
 
-        if self._process.state() == QProcess.ProcessState.NotRunning:
-            return True
+        # Wait for TUN adapter to be released by OS (active polling)
+        self._wait_tun_released()
+        return True
 
-        self._stop_requested = False
-        self.error.emit("failed to stop sing-box process in time")
-        return False
+    @staticmethod
+    def _wait_tun_released(max_wait: float = 5.0) -> None:
+        """Poll until the TUN adapter is gone, up to max_wait seconds."""
+        if os.name != "nt":
+            return
+        step = 0.3
+        waited = 0.0
+        while waited < max_wait:
+            try:
+                result = subprocess.run(
+                    ["netsh", "interface", "show", "interface"],
+                    capture_output=True, text=True, timeout=3,
+                    creationflags=_CREATE_NO_WINDOW,
+                )
+                # Check if any xftun* adapter still exists
+                if "xftun" not in (result.stdout or ""):
+                    return  # TUN adapter gone
+            except Exception:
+                return  # can't check, proceed anyway
+            time.sleep(step)
+            waited += step
 
     def _on_ready_read(self) -> None:
         chunk = self._process.readAllStandardOutput()
