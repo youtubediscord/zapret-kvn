@@ -60,9 +60,9 @@ Zapret KVN объединяет несколько проверенных инс
 
 ## Установка
 
-1. Скачайте архив со страницы [Releases](https://github.com/youtubediscord/zapret-kvn/releases)
-2. Распакуйте в любую папку
-3. Запустите `ZapretKVN.exe`
+1. Скачайте установщик со страницы [Releases](https://github.com/youtubediscord/zapret-kvn/releases)
+2. Запустите скачанный `.exe` — он распакует программу в выбранную папку
+3. Запустите `ZapretKVN.exe` из этой папки
 
 Для режима TUN (VPN) запускайте от имени Администратора (правой кнопкой → "Запуск от имени администратора").
 
@@ -82,8 +82,13 @@ Zapret KVN объединяет несколько проверенных инс
 
 *Скоро*
 
+## Где взять ключ
+
+Если у вас нет VPN-ключа, получите его в боте: [@zapretvpns_bot](https://t.me/zapretvpns_bot)
+
 ## Обратная связь
 
+- [Telegram-канал](https://t.me/vpndiscordyooutube) — новости и обновления
 - [Сообщить о проблеме](https://github.com/youtubediscord/zapret-kvn/issues)
 
 ## Лицензия

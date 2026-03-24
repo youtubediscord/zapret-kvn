@@ -25,7 +25,6 @@ jobs:
           $tags = git tag --list "v*" --sort=-version:refname 2>$null
           if ($tags) {
             $latest = ($tags | Select-Object -First 1).Trim()
-            # Strip "v" prefix and any suffix like "-beta"
             $clean = ($latest.TrimStart("v") -replace '-.*$','')
             $parts = $clean.Split(".")
             $major = [int]$parts[0]
@@ -33,7 +32,7 @@ jobs:
             $patch = [int]$parts[2] + 1
             $version = "$major.$minor.$patch"
           } else {
-            $version = "0.4.0"
+            $version = "0.5.0"
           }
           echo "VERSION=$version" >> $env:GITHUB_ENV
           echo "RELEASE_TAG=v$version" >> $env:GITHUB_ENV
@@ -61,7 +60,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path core | Out-Null
 
-          # ── Xray-core (includes xray.exe, geoip.dat, geosite.dat) ──
+          # ── Xray-core ──
           Write-Host "Downloading Xray-core..."
           $xrayRelease = Invoke-RestMethod "https://api.github.com/repos/XTLS/Xray-core/releases/latest"
           $xrayAsset = $xrayRelease.assets | Where-Object { $_.name -match "Xray-windows-64\.zip$" }
@@ -70,7 +69,6 @@ jobs:
           Copy-Item _xray/xray.exe core/
           Copy-Item _xray/geoip.dat core/
           Copy-Item _xray/geosite.dat core/
-          Copy-Item _xray/LICENSE core/
           Remove-Item -Recurse _xray, xray.zip
 
           # ── tun2socks ──
@@ -89,9 +87,17 @@ jobs:
           Copy-Item _wintun/wintun/bin/amd64/wintun.dll core/
           Remove-Item -Recurse _wintun, wintun.zip
 
-          # ── sing-box ──
+          # ── sing-box (1.14+ required for dialerProxy) ──
           Write-Host "Downloading sing-box..."
-          $sbRelease = Invoke-RestMethod "https://api.github.com/repos/SagerNet/sing-box/releases/latest"
+          $sbReleases = Invoke-RestMethod "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=20"
+          $sbRelease = $sbReleases | Where-Object {
+            -not $_.prerelease -and [version]($_.tag_name.TrimStart("v") -replace '-.*$','') -ge [version]"1.14.0"
+          } | Select-Object -First 1
+          if (-not $sbRelease) {
+            # Fallback: use latest release
+            $sbRelease = Invoke-RestMethod "https://api.github.com/repos/SagerNet/sing-box/releases/latest"
+          }
+          Write-Host "Using sing-box $($sbRelease.tag_name)"
           $sbAsset = $sbRelease.assets | Where-Object { $_.name -match "windows-amd64\.zip$" -and $_.name -notmatch "\.sig" }
           Invoke-WebRequest $sbAsset.browser_download_url -OutFile singbox.zip
           Expand-Archive singbox.zip -DestinationPath _sb -Force
@@ -111,9 +117,27 @@ jobs:
             --manifest uac_admin.manifest `
             --hidden-import win32comext `
             --hidden-import win32comext.shell `
-            --hidden-import win32comext.shell.shellcon
+            --hidden-import win32comext.shell.shellcon `
+            --hidden-import encodings.idna
 
           Copy-Item -Recurse core dist/ZapretKVN/core
+
+          # Copy zapret/ (presets, binaries, lists — tracked in git)
+          if (Test-Path zapret) {
+            Copy-Item -Recurse zapret dist/ZapretKVN/zapret
+          }
+
+          # Debug launcher
+          $launcher = @"
+          @echo off
+          setlocal
+          set XRAY_FLUENT_SHOW_CONSOLE=1
+          echo Launching ZapretKVN in debug mode...
+          "%~dp0ZapretKVN.exe" --show-console
+          pause
+          endlocal
+          "@
+          $launcher | Set-Content "dist/ZapretKVN/Run ZapretKVN Debug.bat" -Encoding ASCII
 
           Write-Host "Build complete:"
           Get-ChildItem dist/ZapretKVN/ | Format-Table Name, Length
@@ -124,37 +148,37 @@ jobs:
           name: ZapretKVN-portable
           path: dist/ZapretKVN/
 
-      # ── Release on every push to main ──
+      # ── Release on push to main ──
 
-      - name: Create release archives
+      - name: Create self-extracting installer
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         shell: pwsh
         run: |
           cd dist/ZapretKVN
-
-          7z a -tzip -mx=5 "../ZapretKVN-v$env:VERSION-windows-x64.zip" *
-          7z a -t7z -mx=5 "../ZapretKVN-v$env:VERSION-windows-x64.7z" *
-
+          7z a -t7z -mx=5 -sfx "../ZapretKVN-v$env:VERSION-windows-x64.exe" *
           cd ..
-          Write-Host "Release archives:"
-          Get-ChildItem *.zip, *.7z | Format-Table Name, Length
+          Write-Host "Release installer:"
+          Get-ChildItem *.exe | Format-Table Name, Length
 
       - name: Create GitHub Release
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: "zapret kvn ${{ env.RELEASE_TAG }}"
+          name: "Zapret KVN ${{ env.RELEASE_TAG }}"
           generate_release_notes: true
           make_latest: true
           files: |
-            dist/ZapretKVN-*-windows-x64.zip
-            dist/ZapretKVN-*-windows-x64.7z
+            dist/ZapretKVN-*-windows-x64.exe
 
       - name: Commit version bump
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add xray_fluent/constants.py
-          git diff --cached --quiet || git commit -m "v${{ env.VERSION }} [skip ci]" && git push
+          if ! git diff --cached --quiet; then
+            git commit -m "v$VERSION [skip ci]"
+            git push
+          fi
