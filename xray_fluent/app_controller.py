@@ -880,6 +880,9 @@ class AppController(QObject):
         self.live_metrics_updated.emit(payload)
         # Update traffic history with process stats
         process_stats = payload.get("process_stats")
+        if self._traffic_save_counter == 0:
+            # Log once at start to verify data flow
+            self._log(f"[metrics] process_stats={'present ' + str(len(process_stats)) + ' procs' if process_stats else 'None'}, mode={self._active_core}")
         if process_stats:
             stats_dict = {}
             for ps in process_stats:
