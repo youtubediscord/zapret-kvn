@@ -212,10 +212,22 @@ FATAL: outbound DNS rule item is deprecated in sing-box 1.12.0 and will be remov
 - QUIC sniff: определяет QUIC → routing по доменам
 - Telegram (AyuGram.exe): подключается через proxy, сообщения ходят
 
-**Ключевые баги при интеграции:**
-1. `outbound` DNS rule deprecated в sing-box 1.12, удалён в 1.14 → FATAL при старте
-2. outbound tag mismatch: routing rules генерируют `outbound: "proxy"`, а outbound назывался `"relay"` → `outbound not found: proxy`
-3. Google service routes (`google.com → direct`) потенциально перехватывают Telegram MTProto (фейковый TLS SNI с google.com доменом)
+**Тест 5: process routing — default=direct + Telegram.exe→proxy**
+
+Конфиг: `tun_default_outbound = "direct"`, process rule `Telegram.exe → proxy`.
+
+**РЕЗУЛЬТАТ: ✅ РАБОТАЕТ!** Telegram идёт через VPN, остальной трафик напрямую.
+
+**Итого подтверждённые режимы:**
+- Default=proxy (весь трафик через VPN) ✅
+- Default=direct + exe→proxy (только выбранные приложения через VPN) ✅
+- Process routing по exe файлам ✅
+- Protect канал (dialerProxy + SS chacha20) ✅
+
+**Ключевые баги при интеграции (исправлены):**
+1. `outbound` DNS rule deprecated в sing-box 1.12, удалён в 1.14 → FATAL при старте. Фикс: `domain_resolver` на outbound'ах
+2. outbound tag mismatch: routing rules генерируют `outbound: "proxy"`, а outbound назывался `"relay"` → `outbound not found: proxy`. Фикс: переименовать в `"proxy"`
+3. Google service routes (`google.com → direct`) потенциально перехватывают Telegram MTProto (фейковый TLS SNI)
 
 ---
 
