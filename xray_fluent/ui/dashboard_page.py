@@ -85,6 +85,7 @@ class DashboardPage(QWidget):
         self._peak_bps = 0.0
         self._down_history: deque[float] = deque(maxlen=300)
         self._up_history: deque[float] = deque(maxlen=300)
+        self._last_process_stats: list | None = None
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
