@@ -822,9 +822,9 @@ class AppController(QObject):
         # Suppress intermediate connection_changed signals during hot-swap/reconnect
         if not self._switching:
             self.connection_changed.emit(running)
-        if running:
+        if running and not self._switching:
             self._start_metrics_worker()
-        else:
+        elif not running:
             self._stop_metrics_worker()
             if not self._switching:
                 self.live_metrics_updated.emit({"down_bps": 0.0, "up_bps": 0.0, "latency_ms": None})
@@ -1008,6 +1008,8 @@ class AppController(QObject):
             self._reconnecting = False
             self._switching = False
             self.connection_changed.emit(self.connected)
+            if self.connected:
+                self._start_metrics_worker()
 
     def export_backup(self, path: Path, passphrase: str = "") -> None:
         self.storage.export_backup(path, passphrase)

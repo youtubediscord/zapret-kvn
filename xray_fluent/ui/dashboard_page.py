@@ -177,12 +177,15 @@ class DashboardPage(QWidget):
         self.connection_target_label.setWordWrap(True)
         connection_layout.addWidget(self.connection_target_label)
 
-        # Profile info labels (read-only)
-        self.profile_name_label = BodyLabel("Профиль не выбран", self.connection_card)
-        self.profile_endpoint_label = CaptionLabel("", self.connection_card)
-        self.profile_endpoint_label.setWordWrap(True)
-        self.profile_group_label = CaptionLabel("Группа: --", self.connection_card)
-        self.profile_latency_label = CaptionLabel("Задержка: --", self.connection_card)
+        # Profile info labels (read-only, hidden — data shown via status/target labels)
+        self.profile_name_label = BodyLabel("", self)
+        self.profile_name_label.setVisible(False)
+        self.profile_endpoint_label = CaptionLabel("", self)
+        self.profile_endpoint_label.setVisible(False)
+        self.profile_group_label = CaptionLabel("", self)
+        self.profile_group_label.setVisible(False)
+        self.profile_latency_label = CaptionLabel("", self)
+        self.profile_latency_label.setVisible(False)
 
         # ── Traffic card ──────────────────────────────────────
         self.traffic_card = CardWidget(self)
