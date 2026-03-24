@@ -353,6 +353,10 @@ class RoutingPage(QWidget):
         self._loading = True
         self._select_combo_value(self.mode_combo, routing.mode)
         self._select_combo_value(self.dns_combo, routing.dns_mode)
+        self._select_combo_value(self._dns_bootstrap_server, routing.dns_bootstrap_server)
+        self._select_combo_value(self._dns_bootstrap_type, routing.dns_bootstrap_type)
+        self._select_combo_value(self._dns_proxy_server, routing.dns_proxy_server)
+        self._select_combo_value(self._dns_proxy_type, routing.dns_proxy_type)
         self.bypass_switch.setChecked(routing.bypass_lan)
         self._select_combo_value(self.tun_default_combo, routing.tun_default_outbound)
 
@@ -420,8 +424,9 @@ class RoutingPage(QWidget):
         self.add_proc_btn.setEnabled(True)
         self.del_proc_btn.setEnabled(True)
         self.proxy_warning.setVisible(not enabled)
-        # TUN default outbound + process presets only relevant in TUN mode
+        # TUN default outbound + process presets + DNS settings only relevant in TUN mode
         self._tun_default_row_widget.setVisible(enabled)
+        self._dns_tun_widget.setVisible(enabled)
         self.tun_default_info.setVisible(enabled)
         self._process_presets_group.setVisible(enabled)
 
@@ -552,6 +557,10 @@ class RoutingPage(QWidget):
     def _emit_apply(self) -> None:
         mode = self.mode_combo.currentData() or "rule"
         dns_mode = self.dns_combo.currentData() or "system"
+        dns_bootstrap_server = self._dns_bootstrap_server.currentData() or "1.1.1.1"
+        dns_bootstrap_type = self._dns_bootstrap_type.currentData() or "udp"
+        dns_proxy_server = self._dns_proxy_server.currentData() or "8.8.8.8"
+        dns_proxy_type = self._dns_proxy_type.currentData() or "tcp"
 
         direct: list[str] = []
         proxy: list[str] = []
@@ -608,6 +617,10 @@ class RoutingPage(QWidget):
             proxy_domains=proxy,
             block_domains=block,
             dns_mode=str(dns_mode),
+            dns_bootstrap_server=str(dns_bootstrap_server),
+            dns_bootstrap_type=str(dns_bootstrap_type),
+            dns_proxy_server=str(dns_proxy_server),
+            dns_proxy_type=str(dns_proxy_type),
             process_rules=process_rules,
             process_preset_routes=process_preset_routes,
             service_routes=service_routes,
