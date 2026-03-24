@@ -4,8 +4,10 @@
 
 <img width="1276" height="873" alt="image" src="https://github.com/user-attachments/assets/089ae538-686f-4b6d-94f6-c0ff56bd3664" />
 
+> [!WARNING]
 > Первая бета-версия. Некоторый функционал может работать некорректно.
-> Сообщить о проблеме: [Issues](https://github.com/youtubediscord/zapret-kvn/issues)
+> 
+> Сообщить о проблеме рекомендуем ТОЛЬКО сюда: [Issues](https://github.com/youtubediscord/zapret-kvn/issues)
 
 
 ## Что это
