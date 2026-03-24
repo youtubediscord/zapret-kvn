@@ -1,76 +1,91 @@
-# Xray Fluent GUI (PyQt6 + Fluent Widgets)
+# Zapret KVN
 
-Windows-focused GUI shell for `xray.exe` with a Windows 11-like Fluent interface.
+Простой VPN-клиент для Windows с обходом блокировок. Работает из коробки.
 
-## What is included in this MVP
+> Первая бета-версия. Некоторый функционал может работать некорректно.
+> Сообщить о проблеме: [Issues](https://github.com/youtubediscord/zapret-kvn/issues)
 
-- Fast node import from clipboard (`vless://`, `vmess://`, `trojan://`, `ss://`, `socks://`, `http://`, raw outbound JSON)
-- Quick switch between nodes (Dashboard + system tray)
-- Start/stop Xray core directly (`core/xray.exe`)
-- System proxy mode (HTTP + SOCKS loopback)
-- Routing modes: `Global`, `Rule`, `Direct`
-- Basic routing editor (direct/proxy/block lists)
-- TCP ping for nodes
-- Real connectivity test through Xray proxy
-- Live mini-metrics on Dashboard (download/upload rate + RTT)
-- Export selected outbound JSON and full runtime `xray_config.json`
-- Runtime logs, diagnostics export (ZIP with redacted config)
-- Separate Xray core updater with channels (`stable`, `beta`, `nightly`)
-- DPAPI-encrypted local state storage
-- Master password + auto-lock
-- Light / dark / system theme and accent color
+---
 
-## Project layout
+## Что это
 
-- `main.py` - app entrypoint
-- `xray_fluent/app_controller.py` - app orchestration
-- `xray_fluent/link_parser.py` - URI parser
-- `xray_fluent/config_builder.py` - Xray config generator
-- `xray_fluent/xray_manager.py` - process lifecycle
-- `xray_fluent/proxy_manager.py` - Windows system proxy
-- `xray_fluent/ui/` - all Fluent UI pages
-- `core/` - Xray core binaries
+Zapret KVN объединяет несколько проверенных инструментов (xray-core, sing-box, Zapret) в одну программу с удобным интерфейсом. Под капотом — оркестрация ядер для максимальной скорости и совместимости с любым транспортом.
 
-## Requirements
+Программа рассчитана на то, чтобы работать из коробки — без ручной настройки конфигов и командной строки.
 
-- Windows 10/11 x64
-- Python 3.13
+## Возможности
 
-Install deps:
+### Подключение по ключу
 
-```bash
-python -m pip install -r requirements.txt
-```
+Вставьте ключ (ссылку) через **Ctrl+V** на странице серверов — программа сама определит тип и настроит подключение.
 
-If `qfluentwidgets` is not in your Python env, install it explicitly:
+Поддерживаются все виды ключей xray-core с любым транспортом:
+- VLESS (+ Reality, XTLS-Vision, xhttp, WebSocket, gRPC, HTTP/2)
+- Trojan
+- Shadowsocks
+- VMess
 
-`python -m pip install PyQt6-Fluent-Widgets`
+### Режим TUN (VPN)
 
-## Run
+Перехватывает весь трафик на уровне системы. Автоматически направляет компоненты Windows (обновления, Defender, OneDrive) напрямую, а браузеры и мессенджеры — через VPN.
 
-```bash
-python main.py
-```
+Доступен быстрый выбор приложений: Telegram, Discord, Chrome, Firefox, Spotify, торренты. Можно добавить свои игры и программы.
 
-Start minimized to tray:
+> Режим TUN требует запуска от имени Администратора.
 
-```bash
-python main.py --minimized
-```
+### Системный прокси
 
-## Build portable EXE (PyInstaller)
+Максимально быстрый режим без VPN — меньше прослоек, выше скорость туннеля. Подходит если нужно пропускать через прокси только браузеры.
 
-```powershell
-./build_portable.ps1
-```
+### Встроенный Zapret
 
-Output:
+Обход замедлений без VPN с помощью DPI bypass. Несколько встроенных пресетов на выбор. Можно использовать вместо Zapret GUI.
 
-- `dist/XrayFluent/` - portable folder
-- `dist/XrayFluent-portable.zip` - zipped portable bundle
+> Не все пресеты пока корректно обходят замедление VLESS. Работаем над этим.
 
-## Notes
+### Мониторинг
 
-- No TUN mode in this version (system proxy only)
-- Subscription URLs are intentionally not implemented yet
-- App update feed and Xray core feed can be configured separately in Settings
+- Скорость загрузки и отдачи в реальном времени
+- Пинг сервера
+- Трафик по процессам (какое приложение сколько потребляет)
+- Тест скорости серверов
+
+### Другое
+
+- Автопереключение на другой сервер при падении скорости
+- Авто-обновление программы и ядра xray
+- Светлая, тёмная и системная темы
+- Шифрование данных паролем
+- Работа из системного трея
+
+## Установка
+
+1. Скачайте архив со страницы [Releases](https://github.com/youtubediscord/zapret-kvn/releases)
+2. Распакуйте в любую папку
+3. Запустите `ZapretKVN.exe`
+
+Для режима TUN (VPN) запускайте от имени Администратора (правой кнопкой → "Запуск от имени администратора").
+
+## Системные требования
+
+- Windows 10 / 11 (x64)
+- Для режима TUN: права Администратора
+
+## Быстрый старт
+
+1. Получите ключ (ссылку) вида `vless://...` от вашего провайдера VPN
+2. Откройте программу → перейдите на страницу **Серверы**
+3. Нажмите **Ctrl+V** — сервер добавится автоматически
+4. Нажмите кнопку подключения на панели управления
+
+## Скриншоты
+
+*Скоро*
+
+## Обратная связь
+
+- [Сообщить о проблеме](https://github.com/youtubediscord/zapret-kvn/issues)
+
+## Лицензия
+
+MIT
