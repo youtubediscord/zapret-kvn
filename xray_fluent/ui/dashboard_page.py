@@ -269,9 +269,9 @@ class DashboardPage(QWidget):
 
         grid.addWidget(self.connection_card, 0, 0)
         grid.addWidget(self.routing_card, 0, 1)
-        grid.addWidget(self.traffic_card, 1, 0)
-        grid.addWidget(self._proc_traffic_card, 1, 1)
         root.addLayout(grid)
+        root.addWidget(self.traffic_card)
+        root.addWidget(self._proc_traffic_card)
         root.addStretch(1)
 
         # ── Page 1: traffic detail subpage ────────────────────
