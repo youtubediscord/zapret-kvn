@@ -87,8 +87,22 @@ class LiveMetricsWorker(QThread):
                 last_ping_ts = now
 
             process_stats = None
-            if self._mode == "singbox" and iteration_count % 2 == 0:
-                process_stats = collect_process_stats(self._clash_api_port)
+            if iteration_count % 2 == 0:
+                if self._mode == "singbox":
+                    process_stats = collect_process_stats(self._clash_api_port)
+                else:
+                    try:
+                        proxy_procs = get_proxy_connections(self._socks_port, self._http_port)
+                        if proxy_procs:
+                            process_stats = [
+                                ProcessTrafficSnapshot(
+                                    exe=p.exe, upload=0, download=0,
+                                    connections=p.connections, route="proxy",
+                                )
+                                for p in proxy_procs
+                            ]
+                    except Exception:
+                        pass
 
             self.metrics.emit(
                 {
