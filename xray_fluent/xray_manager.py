@@ -11,7 +11,7 @@ from PyQt6.QtCore import QObject, QProcess, pyqtSignal
 
 from .constants import RUNTIME_DIR, XRAY_CONFIG_FILE, XRAY_PATH_DEFAULT
 from .path_utils import resolve_configured_path
-from .subprocess_utils import result_output_text, run_text
+from .subprocess_utils import decode_output, result_output_text, run_text
 
 
 class XrayManager(QObject):
@@ -117,7 +117,7 @@ class XrayManager(QObject):
         chunk = self._process.readAllStandardOutput()
         raw = getattr(chunk, "data")()
         if isinstance(raw, (bytes, bytearray)):
-            text = bytes(raw).decode("utf-8", errors="replace")
+            text = decode_output(bytes(raw))
         else:
             text = str(raw)
         for line in text.splitlines():

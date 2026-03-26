@@ -290,6 +290,7 @@ class UpdateDownloader(QThread):
 
             # Write restart script
             exe_name = "ZapretKVN.exe"
+            current_pid = os.getpid()
             app_dir = str(BASE_DIR)
             src_dir = str(extract_dir)
             script = tmp_dir / "_update.bat"
@@ -298,7 +299,7 @@ class UpdateDownloader(QThread):
                 "chcp 65001 >nul\r\n"
                 "echo Updating zapret kvn...\r\n"
                 "timeout /t 2 /nobreak >nul\r\n"
-                f'taskkill /F /IM {exe_name} 2>nul\r\n'
+                f'taskkill /F /PID {current_pid} 2>nul\r\n'
                 "timeout /t 1 /nobreak >nul\r\n"
                 f'xcopy /E /Y /Q "{src_dir}\\*" "{app_dir}\\"\r\n'
                 "echo Update complete. Restarting...\r\n"

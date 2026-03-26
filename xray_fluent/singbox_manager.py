@@ -13,7 +13,7 @@ from PyQt6.QtCore import QObject, QProcess, pyqtSignal
 
 from .constants import RUNTIME_DIR, SINGBOX_CONFIG_FILE, SINGBOX_PATH_DEFAULT
 from .path_utils import resolve_configured_path
-from .subprocess_utils import kill_processes_by_path, result_output_text, run_text
+from .subprocess_utils import decode_output, kill_processes_by_path, result_output_text, run_text
 
 
 class SingBoxManager(QObject):
@@ -161,7 +161,7 @@ class SingBoxManager(QObject):
         chunk = self._process.readAllStandardOutput()
         raw = getattr(chunk, "data")()
         if isinstance(raw, (bytes, bytearray)):
-            text = bytes(raw).decode("utf-8", errors="replace")
+            text = decode_output(bytes(raw))
         else:
             text = str(raw)
         for line in text.splitlines():

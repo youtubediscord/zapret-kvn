@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,11 +13,13 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 from .constants import BASE_DIR
+from .subprocess_utils import decode_output, kill_processes_by_path
 
 log = logging.getLogger(__name__)
 
 ZAPRET_DIR = BASE_DIR / "zapret"
 WINWS2_EXE = ZAPRET_DIR / "exe" / "winws2.exe"
+WINWS_EXE = ZAPRET_DIR / "exe" / "winws.exe"
 PRESETS_DIR = ZAPRET_DIR / "presets"
 
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -290,14 +291,9 @@ class ZapretManager(QObject):
         killed: list[str] = []
         if os.name != "nt":
             return killed
-        for exe_name in ("winws2.exe", "winws.exe"):
+        for exe_name, exe_path in (("winws2.exe", WINWS2_EXE), ("winws.exe", WINWS_EXE)):
             try:
-                result = subprocess.run(
-                    ["taskkill", "/F", "/IM", exe_name],
-                    capture_output=True, timeout=5,
-                    creationflags=_CREATE_NO_WINDOW,
-                )
-                if result.returncode == 0:
+                if kill_processes_by_path(exe_name, exe_path, timeout=5):
                     killed.append(exe_name)
             except Exception:
                 pass
@@ -324,7 +320,7 @@ class ZapretManager(QObject):
                        self._process.readAllStandardError):
             data = reader().data()
             if data:
-                for line in data.decode("utf-8", errors="replace").splitlines():
+                for line in decode_output(bytes(data)).splitlines():
                     stripped = line.strip()
                     if stripped:
                         lines.append(stripped)
@@ -334,7 +330,7 @@ class ZapretManager(QObject):
         if self._process is None:
             return
         data = self._process.readAllStandardOutput().data()
-        for line in data.decode("utf-8", errors="replace").splitlines():
+        for line in decode_output(bytes(data)).splitlines():
             if line.strip():
                 self.log_line.emit(f"[zapret] {line.strip()}")
 
@@ -342,7 +338,7 @@ class ZapretManager(QObject):
         if self._process is None:
             return
         data = self._process.readAllStandardError().data()
-        for line in data.decode("utf-8", errors="replace").splitlines():
+        for line in decode_output(bytes(data)).splitlines():
             if line.strip():
                 self.log_line.emit(f"[zapret] {line.strip()}")
 

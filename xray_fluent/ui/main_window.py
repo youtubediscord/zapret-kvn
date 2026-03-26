@@ -35,12 +35,22 @@ from .zapret_page import ZapretPage
 
 
 class MainWindow(FluentWindow):
-    def __init__(self, force_minimized: bool = False, defer_init: bool = False):
+    def __init__(self, defer_init: bool = False):
         super().__init__()
-        self.force_minimized = force_minimized
         self._quitting = False
         self._tray_notified = False
         self._initialized = False
+        self._tray_available = QSystemTrayIcon.isSystemTrayAvailable()
+        self.tray: QSystemTrayIcon | None = None
+        self.tray_show_action: QAction | None = None
+        self.tray_connect_action: QAction | None = None
+        self.tray_next_action: QAction | None = None
+        self.tray_quit_action: QAction | None = None
+        self.tray_mode_menu: QMenu | None = None
+        self.tray_mode_group: QActionGroup | None = None
+        self.tray_mode_global: QAction | None = None
+        self.tray_mode_rule: QAction | None = None
+        self.tray_mode_direct: QAction | None = None
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(QIcon(":/qfluentwidgets/images/logo.png"))
@@ -108,6 +118,9 @@ class MainWindow(FluentWindow):
         self.addSubInterface(self.settings_page, FIF.SETTING, "Настройки", NavigationItemPosition.BOTTOM)
 
     def _create_tray(self) -> None:
+        if not self._tray_available:
+            return
+
         self.tray = QSystemTrayIcon(self)
         self.tray.setIcon(QIcon(":/qfluentwidgets/images/logo.png"))
         self.tray.setToolTip(APP_NAME)
@@ -248,15 +261,19 @@ class MainWindow(FluentWindow):
 
     def _on_connection_changed(self, connected: bool) -> None:
         self.dashboard_page.set_connection(connected)
-        self.tray_connect_action.setText("Отключить" if connected else "Подключить")
+        if self.tray_connect_action is not None:
+            self.tray_connect_action.setText("Отключить" if connected else "Подключить")
         self._refresh_tray_tooltip()
 
     def _on_routing_changed(self, routing: RoutingSettings) -> None:
         self.routing_page.set_routing(routing)
         self.dashboard_page.set_routing_snapshot(routing)
-        self.tray_mode_global.setChecked(routing.mode == "global")
-        self.tray_mode_rule.setChecked(routing.mode == "rule")
-        self.tray_mode_direct.setChecked(routing.mode == "direct")
+        if self.tray_mode_global is not None:
+            self.tray_mode_global.setChecked(routing.mode == "global")
+        if self.tray_mode_rule is not None:
+            self.tray_mode_rule.setChecked(routing.mode == "rule")
+        if self.tray_mode_direct is not None:
+            self.tray_mode_direct.setChecked(routing.mode == "direct")
 
     def _on_settings_changed(self, settings: AppSettings) -> None:
         self.settings_page.set_values(settings, self.controller.state.security)
@@ -565,6 +582,8 @@ class MainWindow(FluentWindow):
                 pass
 
     def _refresh_tray_tooltip(self) -> None:
+        if self.tray is None:
+            return
         node = self.controller.selected_node
         status = "Подключено" if self.controller.connected else "Отключено"
         node_text = node.name if node else "Нет сервера"
@@ -714,10 +733,20 @@ class MainWindow(FluentWindow):
             e.accept()
             return
 
+        if not self._tray_available:
+            self._quitting = True
+            self._save_geometry()
+            self.controller.shutdown()
+            e.accept()
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
+            return
+
         self._save_geometry()
         self.controller.save()
         e.ignore()
         self.hide()
-        if not self._tray_notified:
+        if self.tray is not None and not self._tray_notified:
             self.tray.showMessage(APP_NAME, "Приложение свёрнуто в системный трей", QSystemTrayIcon.MessageIcon.Information, 2000)
             self._tray_notified = True

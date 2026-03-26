@@ -11,7 +11,7 @@ _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 from PyQt6.QtCore import QObject, QProcess, pyqtSignal
 
 from .constants import BASE_DIR
-from .subprocess_utils import kill_processes_by_path, result_output_text, run_text
+from .subprocess_utils import decode_output, kill_processes_by_path, result_output_text, run_text
 
 TUN2SOCKS_PATH_DEFAULT = BASE_DIR / "core" / "tun2socks.exe"
 TUN_DEVICE_NAME = "ZapretKVN_TUN"
@@ -200,6 +200,21 @@ class Tun2SocksManager(QObject):
                 cmd = ["route", "add", destination, "mask", mask, orig_gw, "metric", "1"]
                 cmds.append(cmd)
                 self._helper_routes.append([destination, mask, orig_gw])
+
+            cleanup_cmds = [
+                ["route", "delete", "0.0.0.0", "mask", "128.0.0.0", TUN_GW],
+                ["route", "delete", "128.0.0.0", "mask", "128.0.0.0", TUN_GW],
+                ["netsh", "interface", "ipv4", "delete", "route", "0.0.0.0/1", f"interface={tun_idx}"],
+                ["netsh", "interface", "ipv4", "delete", "route", "128.0.0.0/1", f"interface={tun_idx}"],
+                ["netsh", "interface", "ipv6", "delete", "route", "::/0", f"interface={tun_idx}"],
+            ]
+            if self._server_ip:
+                cleanup_cmds.append(["route", "delete", self._server_ip])
+            for destination, mask, gateway in self._helper_routes:
+                cleanup_cmds.append(["route", "delete", destination, "mask", mask, gateway])
+            for cmd in cleanup_cmds:
+                subprocess.run(cmd, capture_output=True, timeout=5, creationflags=_CREATE_NO_WINDOW)
+
             # Use netsh to add TUN routes — this correctly sets interface metric
             cmds += [
                 ["netsh", "interface", "ipv4", "add", "route", "0.0.0.0/1", f"interface={tun_idx}", f"nexthop={TUN_GW}", "metric=0"],
@@ -209,6 +224,13 @@ class Tun2SocksManager(QObject):
             for cmd in cmds:
                 r = run_text(cmd, timeout=5, creationflags=_CREATE_NO_WINDOW)
                 self.log_received.emit(f"[tun2socks] {' '.join(cmd)} -> rc={r.returncode}")
+                if r.returncode != 0:
+                    details = result_output_text(r).strip()
+                    if details:
+                        self.log_received.emit(f"[tun2socks] command output: {details}")
+                    self._cleanup_routes()
+                    self.error.emit(f"failed to configure route: {' '.join(cmd)}")
+                    return False
             return True
         except Exception as exc:
             self.log_received.emit(f"[tun2socks] route setup error: {exc}")
@@ -253,7 +275,7 @@ class Tun2SocksManager(QObject):
         chunk = self._process.readAllStandardOutput()
         raw = getattr(chunk, "data")()
         if isinstance(raw, (bytes, bytearray)):
-            text = bytes(raw).decode("utf-8", errors="replace")
+            text = decode_output(bytes(raw))
         else:
             text = str(raw)
         for line in text.splitlines():

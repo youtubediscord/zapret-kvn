@@ -194,6 +194,22 @@ def _disable_system_proxy_on_exit() -> None:
         pass
 
 
+def _load_saved_start_hidden() -> bool:
+    try:
+        from xray_fluent.storage import PassphraseRequired, StateStorage
+    except Exception:
+        _bootstrap_logger.exception("Failed to import state storage for startup preflight")
+        return False
+
+    try:
+        return bool(StateStorage().load().settings.start_minimized)
+    except PassphraseRequired:
+        _bootstrap_logger.info("State is passphrase-protected; start_minimized preflight skipped")
+    except Exception:
+        _bootstrap_logger.exception("Failed to pre-read start_minimized from state")
+    return False
+
+
 def _log_process_exit() -> None:
     _bootstrap_logger.info("----- process exit -----")
 
@@ -241,7 +257,7 @@ def main() -> int:
     import qfluentwidgets  # noqa: F401
     from PyQt6.QtCore import QSize
     from PyQt6.QtGui import QIcon
-    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
     from qfluentwidgets import SplashScreen
     from qframelesswindow import StandardTitleBar
 
@@ -251,12 +267,17 @@ def main() -> int:
     _bootstrap_logger.info("Creating QApplication")
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
-    app.setQuitOnLastWindowClosed(False)
+    tray_available = QSystemTrayIcon.isSystemTrayAvailable()
+    app.setQuitOnLastWindowClosed(not tray_available)
 
-    start_hidden = args.minimized
+    start_hidden = args.minimized or (_load_saved_start_hidden() and not args.show_console)
+    if start_hidden and not tray_available:
+        _bootstrap_logger.warning("System tray unavailable; disabling minimized startup")
+        start_hidden = False
+    _bootstrap_logger.info("system tray available=%s start_hidden=%s", tray_available, start_hidden)
 
     _bootstrap_logger.info("Creating main window shell")
-    window = MainWindow(force_minimized=start_hidden, defer_init=not start_hidden)
+    window = MainWindow(defer_init=not start_hidden)
 
     splash = None
     if not start_hidden:
@@ -282,9 +303,6 @@ def main() -> int:
 
     mica_enabled = getattr(window, "isMicaEffectEnabled", lambda: False)()
     _bootstrap_logger.info("main window created: mica_enabled=%s", mica_enabled)
-
-    if window.controller.state.settings.start_minimized and not args.minimized and not args.show_console:
-        start_hidden = True
 
     if start_hidden:
         _bootstrap_logger.info("Starting minimized to tray")
