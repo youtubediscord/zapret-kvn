@@ -518,6 +518,16 @@ class MainWindow(FluentWindow):
                 self._show_status("info", "У вас установлена последняя версия")
             return
 
+        if not self.controller.state.settings.allow_updates:
+            self._pending_update = None
+            self.updates_page.show_idle()
+            self.updates_page.set_app_status(
+                f"Доступна новая версия: v{update.version}. Установка отключена в настройках"
+            )
+            if not silent:
+                self._show_status("warning", "Доступно обновление, но установка отключена в настройках")
+            return
+
         self._pending_update = update
         self.updates_page.show_update_available(update.version)
         try:
@@ -527,6 +537,9 @@ class MainWindow(FluentWindow):
         self.updates_page.download_btn.clicked.connect(
             lambda: self._start_update_download(self._pending_update)
         )
+
+        if silent:
+            return
 
         # Switch to Updates page and show dialog
         self.switchTo(self.updates_page)
@@ -545,6 +558,12 @@ class MainWindow(FluentWindow):
             self._start_update_download(update)
 
     def _start_update_download(self, update: AppUpdate) -> None:
+        if not self.controller.state.settings.allow_updates:
+            self.updates_page.show_idle()
+            self.updates_page.set_app_status("Установка обновлений отключена в настройках")
+            self._show_status("warning", "Установка обновлений отключена в настройках")
+            return
+
         self._update_in_progress = True
         self.switchTo(self.updates_page)
         self.updates_page.show_download_progress(0)

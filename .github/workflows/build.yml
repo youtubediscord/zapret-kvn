@@ -144,12 +144,16 @@ jobs:
           # Zip for auto-updater
           7z a -tzip -mx=5 "../ZapretKVN-v$env:VERSION-windows-x64.zip" *
 
+          $zipPath = "../ZapretKVN-v$env:VERSION-windows-x64.zip"
+          $zipHash = (Get-FileHash $zipPath -Algorithm SHA256).Hash.ToLower()
+          Set-Content "$zipPath.sha256" -Value $zipHash -Encoding ASCII
+
           # 7z archive
           7z a -t7z -mx=5 "../ZapretKVN-v$env:VERSION-windows-x64.7z" *
 
           cd ..
           Write-Host "Release archives:"
-          Get-ChildItem *.exe, *.zip, *.7z | Format-Table Name, Length
+          Get-ChildItem *.exe, *.zip, *.7z, *.sha256 | Format-Table Name, Length
 
       - name: Create GitHub Release
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -163,6 +167,7 @@ jobs:
             dist/ZapretKVN-*-windows-x64.exe
             dist/ZapretKVN-*-windows-x64.zip
             dist/ZapretKVN-*-windows-x64.7z
+            dist/ZapretKVN-*-windows-x64.zip.sha256
 
       - name: Commit version bump
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'

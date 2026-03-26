@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -55,11 +56,37 @@ class AppUpdate:
     download_url: str
     size: int
     notes: str
+    digest_sha256: str = ""
 
 
 def _parse_version(v: str) -> tuple[int, ...]:
     clean = v.lstrip("v").split("-")[0]
     return tuple(int(x) for x in clean.split(".") if x.isdigit())
+
+
+def _extract_digest(value: str) -> str:
+    text = value.strip().lower()
+    if text.startswith("sha256:"):
+        text = text.split(":", 1)[1].strip()
+    parts = "".join(ch for ch in text if ch in "0123456789abcdef")
+    return parts if len(parts) == 64 else ""
+
+
+def _sha256_file(file_path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(file_path, "rb") as file:
+        while True:
+            chunk = file.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _fetch_text(url: str) -> str:
+    request = Request(url, headers={"User-Agent": USER_AGENT})
+    with urlopen(request, timeout=15) as response:
+        return response.read().decode("utf-8", errors="replace")
 
 
 class UpdateChecker(QThread):
@@ -93,12 +120,36 @@ class UpdateChecker(QThread):
                 self.error.emit(f"Релиз {tag} найден, но отсутствует Windows zip-архив")
                 return
 
+            digest = _extract_digest(str(asset.get("digest") or ""))
+            if not digest:
+                asset_name = str(asset.get("name") or "")
+                sidecar = None
+                for suffix in (".sha256", ".dgst"):
+                    expected = f"{asset_name}{suffix}".lower()
+                    sidecar = next(
+                        (
+                            candidate for candidate in data.get("assets", [])
+                            if str(candidate.get("name") or "").lower() == expected
+                        ),
+                        None,
+                    )
+                    if sidecar:
+                        break
+                if sidecar:
+                    digest = _extract_digest(
+                        _fetch_text(str(sidecar.get("browser_download_url") or ""))
+                    )
+            if not digest:
+                self.error.emit(f"Релиз {tag} найден, но архив не содержит SHA-256")
+                return
+
             self.result.emit(AppUpdate(
                 version=tag.lstrip("v"),
                 tag=tag,
                 download_url=asset["browser_download_url"],
                 size=asset.get("size", 0),
                 notes=data.get("body", ""),
+                digest_sha256=digest,
             ))
         except Exception as exc:
             self.error.emit(str(exc))
@@ -300,6 +351,19 @@ class UpdateDownloader(QThread):
                 shutil.rmtree(tmp_dir, ignore_errors=True)
                 return
 
+            self.status.emit("Проверка архива...")
+            expected_hash = _extract_digest(self._update.digest_sha256)
+            if not expected_hash:
+                self.error.emit("У релизного архива отсутствует SHA-256")
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                return
+
+            real_hash = _sha256_file(zip_path)
+            if real_hash.lower() != expected_hash.lower():
+                self.error.emit("Контрольная сумма архива не совпадает")
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                return
+
             self.progress.emit(100)
             self.status.emit("Распаковка...")
 
@@ -326,14 +390,32 @@ class UpdateDownloader(QThread):
                 f"$appDir = {_powershell_literal(str(app_dir))}",
                 f"$exePath = {_powershell_literal(str(app_dir / exe_name))}",
                 f"$tempDir = {_powershell_literal(str(tmp_dir))}",
+                "$preserveNames = @('data')",
+                "$backupDir = Join-Path $tempDir '_backup'",
+                "New-Item -ItemType Directory -Path $backupDir -Force | Out-Null",
                 "for ($i = 0; $i -lt 120; $i++) {",
                 "    if (-not (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue)) { break }",
                 "    Start-Sleep -Milliseconds 500",
                 "}",
                 "$proc = Get-Process -Id $pidToWait -ErrorAction SilentlyContinue",
                 "if ($proc) { Stop-Process -Id $pidToWait -Force }",
-                "Get-ChildItem -LiteralPath $sourceDir -Force | ForEach-Object {",
-                "    Copy-Item -LiteralPath $_.FullName -Destination $appDir -Recurse -Force",
+                "$sourceItems = @(Get-ChildItem -LiteralPath $sourceDir -Force | Where-Object { $preserveNames -notcontains $_.Name })",
+                "try {",
+                "    Get-ChildItem -LiteralPath $appDir -Force | Where-Object { $preserveNames -notcontains $_.Name } | ForEach-Object {",
+                "        Move-Item -LiteralPath $_.FullName -Destination $backupDir -Force",
+                "    }",
+                "    foreach ($item in $sourceItems) {",
+                "        Copy-Item -LiteralPath $item.FullName -Destination $appDir -Recurse -Force",
+                "    }",
+                "}",
+                "catch {",
+                "    Get-ChildItem -LiteralPath $appDir -Force -ErrorAction SilentlyContinue | Where-Object { $preserveNames -notcontains $_.Name } | ForEach-Object {",
+                "        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue",
+                "    }",
+                "    Get-ChildItem -LiteralPath $backupDir -Force -ErrorAction SilentlyContinue | ForEach-Object {",
+                "        Move-Item -LiteralPath $_.FullName -Destination $appDir -Force",
+                "    }",
+                "    throw",
                 "}",
                 "Start-Process -FilePath $exePath",
                 "Start-Sleep -Seconds 2",

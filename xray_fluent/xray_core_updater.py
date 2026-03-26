@@ -40,7 +40,7 @@ class XrayCoreUpdateResult:
     updated: bool = False
 
 
-_SEMVER_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:[-+]([0-9A-Za-z.-]+))?")
+_SEMVER_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?")
 
 
 def _extract_version(text: str) -> str:
@@ -54,21 +54,61 @@ def _extract_version(text: str) -> str:
     return f"{major}.{minor}.{patch}"
 
 
-def _version_key(version: str) -> tuple[int, int, int, int, str] | None:
+def _parse_semver(version: str) -> tuple[int, int, int, list[str]] | None:
     match = _SEMVER_RE.search(version.strip().lstrip("v"))
     if not match:
         return None
     major, minor, patch, suffix = match.groups()
-    stable_flag = 1 if not suffix else 0
-    return int(major), int(minor), int(patch), stable_flag, suffix or ""
+    prerelease = suffix.split(".") if suffix else []
+    return int(major), int(minor), int(patch), prerelease
+
+
+def _compare_prerelease(left: list[str], right: list[str]) -> int:
+    if not left and not right:
+        return 0
+    if not left:
+        return 1
+    if not right:
+        return -1
+
+    for left_part, right_part in zip(left, right):
+        if left_part == right_part:
+            continue
+        left_is_num = left_part.isdigit()
+        right_is_num = right_part.isdigit()
+        if left_is_num and right_is_num:
+            left_num = int(left_part)
+            right_num = int(right_part)
+            if left_num != right_num:
+                return 1 if left_num > right_num else -1
+            continue
+        if left_is_num != right_is_num:
+            return -1 if left_is_num else 1
+        return 1 if left_part > right_part else -1
+
+    if len(left) == len(right):
+        return 0
+    return 1 if len(left) > len(right) else -1
+
+
+def _compare_versions(left: str, right: str) -> int | None:
+    left_parts = _parse_semver(left)
+    right_parts = _parse_semver(right)
+    if left_parts is None or right_parts is None:
+        return None
+
+    left_core = left_parts[:3]
+    right_core = right_parts[:3]
+    if left_core != right_core:
+        return 1 if left_core > right_core else -1
+    return _compare_prerelease(left_parts[3], right_parts[3])
 
 
 def _is_newer(latest: str, current: str) -> bool:
-    latest_key = _version_key(latest)
-    current_key = _version_key(current)
-    if latest_key is None or current_key is None:
+    comparison = _compare_versions(latest, current)
+    if comparison is None:
         return _extract_version(latest) != _extract_version(current)
-    return latest_key > current_key
+    return comparison > 0
 
 
 def _normalize_channel(value: str) -> str:
@@ -100,14 +140,14 @@ def _pick_release_from_github(releases: list[dict], channel: str) -> dict | None
             text = f"{release.get('tag_name', '')} {release.get('name', '')}".lower()
             if "beta" in text or "rc" in text:
                 return release
-        return prereleases[0]
+        return None
 
     # nightly
     for release in prereleases:
         text = f"{release.get('tag_name', '')} {release.get('name', '')}".lower()
         if "nightly" in text or "dev" in text:
             return release
-    return prereleases[0]
+    return None
 
 
 def _find_github_asset(release: dict, name: str) -> dict | None:
@@ -223,18 +263,46 @@ def _install_zip_archive(archive_path: Path, target_xray_path: Path) -> None:
         if not new_xray:
             raise RuntimeError("xray.exe not found in archive")
 
-        backup_path = target_xray_path.with_suffix(".exe.bak")
-        if target_xray_path.exists():
-            shutil.copy2(target_xray_path, backup_path)
+        backup_dir = temp_dir / "_install_backup"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        staged_targets: list[tuple[Path, Path, Path | None]] = []
 
         temp_target = target_xray_path.with_suffix(".exe.new")
         shutil.copy2(new_xray, temp_target)
-        temp_target.replace(target_xray_path)
+        backup_copy: Path | None = None
+        if target_xray_path.exists():
+            backup_copy = backup_dir / target_xray_path.name
+            shutil.copy2(target_xray_path, backup_copy)
+        staged_targets.append((target_xray_path, temp_target, backup_copy))
 
         for optional_name in ("geoip.dat", "geosite.dat", "wintun.dll"):
             src = _find_file(temp_dir, optional_name)
             if src:
-                shutil.copy2(src, target_dir / optional_name)
+                dest = target_dir / optional_name
+                staged = temp_dir / f"{optional_name}.new"
+                shutil.copy2(src, staged)
+                backup_copy = None
+                if dest.exists():
+                    backup_copy = backup_dir / optional_name
+                    shutil.copy2(dest, backup_copy)
+                staged_targets.append((dest, staged, backup_copy))
+
+        replaced_targets: list[tuple[Path, Path | None]] = []
+        try:
+            for dest, staged, backup_copy in staged_targets:
+                staged.replace(dest)
+                replaced_targets.append((dest, backup_copy))
+        except Exception:
+            for dest, backup_copy in reversed(replaced_targets):
+                if backup_copy is not None:
+                    shutil.copy2(backup_copy, dest)
+                elif dest.exists():
+                    dest.unlink()
+            raise
+
+        original_xray = staged_targets[0][2]
+        if original_xray is not None:
+            shutil.copy2(original_xray, target_xray_path.with_suffix(".exe.bak"))
 
 
 def check_and_update_xray_core(
