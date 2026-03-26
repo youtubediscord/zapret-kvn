@@ -167,11 +167,10 @@ def _disable_system_proxy_on_exit() -> None:
             except FileNotFoundError:
                 proxy_server = ""
         if int(enabled) == 1 and _looks_like_app_proxy(str(proxy_server or "")):
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                                r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-                                0, winreg.KEY_SET_VALUE) as key:
-                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
-            _bootstrap_logger.info("System proxy disabled on exit (safety)")
+            from xray_fluent.proxy_manager import ProxyManager
+
+            ProxyManager().disable(restore_previous=True)
+            _bootstrap_logger.info("System proxy restored on exit (safety)")
     except Exception:
         pass
     # Disable leftover TUN adapter if our interface is still present.
@@ -222,6 +221,32 @@ def _hide_console_if_needed() -> None:
         _bootstrap_logger.exception("Failed to hide console window")
 
 
+def _recover_system_proxy_from_previous_run() -> None:
+    """Restore a leaked app-managed system proxy from a previous crashed run."""
+    if sys.platform != "win32":
+        return
+    try:
+        import winreg
+        from xray_fluent.proxy_manager import ProxyManager
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            0,
+            winreg.KEY_READ,
+        ) as key:
+            enabled, _ = winreg.QueryValueEx(key, "ProxyEnable")
+            try:
+                proxy_server, _ = winreg.QueryValueEx(key, "ProxyServer")
+            except FileNotFoundError:
+                proxy_server = ""
+        if int(enabled) == 1 and _looks_like_app_proxy(str(proxy_server or "")):
+            ProxyManager().disable(restore_previous=True)
+            _bootstrap_logger.info("Recovered leaked system proxy from previous run")
+    except Exception:
+        _bootstrap_logger.exception("Failed to recover leaked system proxy")
+
+
 def _enforce_frozen() -> None:
     if not getattr(sys, "frozen", False):
         raise SystemExit(
@@ -234,6 +259,7 @@ def _enforce_frozen() -> None:
 def main() -> int:
     _setup_bootstrap_logging()
     _install_exception_hooks()
+    _recover_system_proxy_from_previous_run()
     _enforce_frozen()
     _hide_console_if_needed()
 

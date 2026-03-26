@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ntpath
 from copy import deepcopy
 from ipaddress import ip_network
 from typing import Any
@@ -71,6 +72,18 @@ def _append_domain_ip_rule(rules: list[dict[str, Any]], items: list[str], outbou
         )
 
 
+def _resolve_xray_process_name(rule: dict[str, str]) -> str:
+    value = str(rule.get("process", "")).strip()
+    if not value:
+        return ""
+    match = str(rule.get("match", "")).strip().lower()
+    if match == "path_regex":
+        return ""
+    if match == "path" or "\\" in value or "/" in value or (len(value) > 1 and value[1] == ":"):
+        return ntpath.basename(value)
+    return value
+
+
 def build_xray_config(node: Node, routing: RoutingSettings, settings: AppSettings, api_port: int = 0) -> dict[str, Any]:
     if not api_port:
         api_port = DEFAULT_XRAY_STATS_API_PORT
@@ -125,7 +138,7 @@ def build_xray_config(node: Node, routing: RoutingSettings, settings: AppSetting
 
     if not settings.tun_mode:
         for pr in routing.process_rules:
-            name = pr.get("process", "").strip()
+            name = _resolve_xray_process_name(pr)
             action = pr.get("action", "direct")
             if name:
                 routing_rules.append({

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import math
 from collections import deque
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QGridLayout,
@@ -34,8 +35,8 @@ from .traffic_graph import DetailTrafficGraphWidget, TrafficGraphWidget
 
 
 def _format_speed(value_bps: float) -> str:
-    value = max(0.0, value_bps)
-    units = ["B/s", "KB/s", "MB/s", "GB/s"]
+    value = 0.0 if not math.isfinite(value_bps) else max(0.0, value_bps)
+    units = ["B/s", "KB/s", "MB/s", "GB/s", "TB/s", "PB/s", "EB/s"]
     unit_index = 0
     while value >= 1024.0 and unit_index < len(units) - 1:
         value /= 1024.0
@@ -82,6 +83,7 @@ class DashboardPage(QWidget):
         self._routing = RoutingSettings()
         self._selected_latency_ms: int | None = None
         self._live_rtt_ms: int | None = None
+        self._transition_busy = False
         self._last_down_bps = 0.0
         self._last_up_bps = 0.0
         self._peak_bps = 0.0
@@ -418,7 +420,7 @@ class DashboardPage(QWidget):
             self._down_history.clear()
             self._up_history.clear()
             self.traffic_graph.clear_data()
-            self._proc_traffic_table.setRowCount(0)
+            self._clear_process_tables()
             self._last_process_stats = None
             if self._connection_phase == "running":
                 self._connection_phase = "idle"
@@ -492,46 +494,32 @@ class DashboardPage(QWidget):
 
     def set_process_stats(self, stats: list | None) -> None:
         if stats is None:
+            self._last_process_stats = None
+            self._clear_process_tables()
             return
-        self._proc_traffic_table.setRowCount(len(stats))
-        for row, ps in enumerate(stats):
-            # 0: Process name
-            self._proc_traffic_table.setItem(row, 0, QTableWidgetItem(ps.exe))
-            # 1: Speed (↓/↑)
-            speed = f"↓{_format_speed(ps.down_speed)}  ↑{_format_speed(ps.up_speed)}"
-            self._proc_traffic_table.setItem(row, 1, QTableWidgetItem(speed))
-            # 2: VPN traffic (green)
-            vpn_item = QTableWidgetItem(self._format_bytes(ps.proxy_bytes))
-            if ps.proxy_bytes > 0:
-                vpn_item.setForeground(QColor("#2ecc71"))
-            self._proc_traffic_table.setItem(row, 2, vpn_item)
-            # 3: Direct traffic
-            self._proc_traffic_table.setItem(row, 3, QTableWidgetItem(self._format_bytes(ps.direct_bytes)))
-            # 4: Connections active (total)
-            conn_text = f"{ps.connections} ({ps.total_connections})" if ps.total_connections > ps.connections else str(ps.connections)
-            self._proc_traffic_table.setItem(row, 4, QTableWidgetItem(conn_text))
-            # 5: Top host
-            host = ps.top_host
-            if len(host) > 30:
-                host = host[:27] + "..."
-            self._proc_traffic_table.setItem(row, 5, QTableWidgetItem(host))
-            # 6: Total session
-            total = ps.upload + ps.download
-            self._proc_traffic_table.setItem(row, 6, QTableWidgetItem(self._format_bytes(total)))
-        # Update detail page if visible
+        self._last_process_stats = list(stats)
+        self._apply_process_stats_to_table(self._proc_traffic_table, stats)
         if self._stack.currentIndex() == 2:
-            self._update_proc_detail_table()
+            self._apply_process_stats_to_table(self._proc_detail_table, stats)
+
+    def set_transition_busy(self, busy: bool) -> None:
+        self._transition_busy = busy
+        self._apply_interaction_state()
 
     @staticmethod
     def _format_bytes(b: int) -> str:
-        if b < 1024:
-            return f"{b} B"
-        elif b < 1024 * 1024:
-            return f"{b / 1024:.1f} KB"
-        elif b < 1024 * 1024 * 1024:
-            return f"{b / 1024 / 1024:.1f} MB"
-        else:
-            return f"{b / 1024 / 1024 / 1024:.2f} GB"
+        value = float(max(0, int(b)))
+        units = ["B", "KB", "MB", "GB", "TB", "PB", "EB"]
+        unit_idx = 0
+        while value >= 1024.0 and unit_idx < len(units) - 1:
+            value /= 1024.0
+            unit_idx += 1
+
+        if unit_idx == 0:
+            return f"{int(value)} {units[unit_idx]}"
+        if unit_idx <= 2:
+            return f"{value:.1f} {units[unit_idx]}"
+        return f"{value:.2f} {units[unit_idx]}"
 
     # ── Refresh logic ─────────────────────────────────────────
 
@@ -544,8 +532,7 @@ class DashboardPage(QWidget):
         self._refresh_profile_card()
         self._refresh_traffic_card()
         self._refresh_routing_card()
-        has_profiles = bool(self._nodes)
-        self.toggle_btn.setEnabled(has_profiles and self._connection_phase != "starting")
+        self._apply_interaction_state()
         if self._stack.currentIndex() == 1:
             self._refresh_detail_stats()
 
@@ -639,18 +626,46 @@ class DashboardPage(QWidget):
         self._proc_breadcrumb.blockSignals(False)
 
     def _update_proc_detail_table(self) -> None:
-        """Copy current compact table data to detail table."""
-        src = self._proc_traffic_table
-        dst = self._proc_detail_table
-        rows = src.rowCount()
-        dst.setRowCount(rows)
-        for r in range(rows):
-            for c in range(7):
-                item = src.item(r, c)
-                if item:
-                    new_item = QTableWidgetItem(item.text())
-                    new_item.setForeground(item.foreground())
-                    dst.setItem(r, c, new_item)
+        """Refresh detail table from the latest cached process stats."""
+        self._apply_process_stats_to_table(self._proc_detail_table, self._last_process_stats or [])
+
+    def _clear_process_tables(self) -> None:
+        self._proc_traffic_table.setRowCount(0)
+        self._proc_detail_table.setRowCount(0)
+
+    def _apply_process_stats_to_table(self, table: TableWidget, stats: list) -> None:
+        table.setUpdatesEnabled(False)
+        try:
+            if table.rowCount() != len(stats):
+                table.setRowCount(len(stats))
+            for row, ps in enumerate(stats):
+                speed = f"↓{_format_speed(ps.down_speed)}  ↑{_format_speed(ps.up_speed)}"
+                conn_text = f"{ps.connections} ({ps.total_connections})" if ps.total_connections > ps.connections else str(ps.connections)
+                host = ps.top_host
+                if len(host) > 30:
+                    host = host[:27] + "..."
+                total = ps.upload + ps.download
+
+                self._set_table_text(table, row, 0, ps.exe)
+                self._set_table_text(table, row, 1, speed)
+                vpn_item = self._set_table_text(table, row, 2, self._format_bytes(ps.proxy_bytes))
+                vpn_item.setForeground(QColor("#2ecc71") if ps.proxy_bytes > 0 else QBrush())
+                self._set_table_text(table, row, 3, self._format_bytes(ps.direct_bytes))
+                self._set_table_text(table, row, 4, conn_text)
+                self._set_table_text(table, row, 5, host)
+                self._set_table_text(table, row, 6, self._format_bytes(total))
+        finally:
+            table.setUpdatesEnabled(True)
+
+    def _set_table_text(self, table: TableWidget, row: int, column: int, text: str) -> QTableWidgetItem:
+        item = table.item(row, column)
+        if item is None:
+            item = QTableWidgetItem(text)
+            table.setItem(row, column, item)
+            return item
+        if item.text() != text:
+            item.setText(text)
+        return item
 
     # ── Helpers ───────────────────────────────────────────────
 
@@ -732,5 +747,13 @@ class DashboardPage(QWidget):
         self.proxy_switch.blockSignals(True)
         self.proxy_switch.setChecked(self._settings.enable_system_proxy)
         self.proxy_switch.setText("Вкл" if self._settings.enable_system_proxy else "Выкл")
-        self.proxy_switch.setEnabled(not self._settings.tun_mode)
         self.proxy_switch.blockSignals(False)
+        self._apply_interaction_state()
+
+    def _apply_interaction_state(self) -> None:
+        has_profiles = bool(self._nodes)
+        busy = self._transition_busy or self._connection_phase == "starting"
+        self.toggle_btn.setEnabled(has_profiles and not busy)
+        self.tun_switch.setEnabled(not busy)
+        self.mode_combo.setEnabled(not busy)
+        self.proxy_switch.setEnabled(not busy and not self._settings.tun_mode)

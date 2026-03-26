@@ -13,7 +13,16 @@ from PyQt6.QtCore import QObject, QProcess, pyqtSignal
 
 from .constants import RUNTIME_DIR, SINGBOX_CONFIG_FILE, SINGBOX_PATH_DEFAULT
 from .path_utils import resolve_configured_path
-from .subprocess_utils import decode_output, kill_processes_by_path, result_output_text, run_text
+from .subprocess_utils import (
+    decode_output,
+    kill_processes_by_path,
+    result_output_text,
+    run_text,
+    sleep_with_events,
+    wait_for_qprocess_finished,
+    wait_for_qprocess_ready_read,
+    wait_for_qprocess_started,
+)
 
 
 class SingBoxManager(QObject):
@@ -81,14 +90,14 @@ class SingBoxManager(QObject):
             self._process.setArguments(["run", "-c", str(SINGBOX_CONFIG_FILE), "-D", str(core_dir)])
             self._process.start()
 
-            if not self._process.waitForStarted(4000):
+            if not wait_for_qprocess_started(self._process, 4000):
                 self.error.emit(f"failed to start sing-box process: {self._process.errorString()}")
                 return False
 
             # TUN adapter creation can take several seconds — wait for output
-            self._process.waitForReadyRead(5000)
+            wait_for_qprocess_ready_read(self._process, 5000)
             # Brief pause to let FATAL errors surface
-            time.sleep(0.3)
+            sleep_with_events(0.3)
             if self._process.state() == QProcess.ProcessState.NotRunning:
                 # "file already exists" — wait for TUN release and retry
                 if attempt < 2:
@@ -108,7 +117,7 @@ class SingBoxManager(QObject):
             return
         try:
             if kill_processes_by_path(exe.name, exe, timeout=5):
-                time.sleep(1)  # give OS time to release the TUN adapter
+                sleep_with_events(1.0)
         except Exception:
             pass
 
@@ -122,9 +131,9 @@ class SingBoxManager(QObject):
 
         self._stop_requested = expected
         self._process.terminate()
-        if not self._process.waitForFinished(3000):
+        if not wait_for_qprocess_finished(self._process, 3000):
             self._process.kill()
-            self._process.waitForFinished(2000)
+            wait_for_qprocess_finished(self._process, 2000)
 
         if self._process.state() != QProcess.ProcessState.NotRunning:
             self._stop_requested = False
@@ -154,7 +163,7 @@ class SingBoxManager(QObject):
                     return  # TUN adapter gone
             except Exception:
                 return  # can't check, proceed anyway
-            time.sleep(step)
+            sleep_with_events(step)
             waited += step
 
     def _on_ready_read(self) -> None:

@@ -25,6 +25,7 @@ class PresetEditWidget(QWidget):
         super().__init__(parent)
         self._original_content = ""
         self._original_name = ""
+        self._original_description = ""
 
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 20, 24, 20)
@@ -88,6 +89,7 @@ class PresetEditWidget(QWidget):
                    created: str = "", modified: str = "") -> None:
         """Load a preset into the editor."""
         self._original_name = name
+        self._original_description = description
         self._original_content = content
 
         self.name_edit.setText(name)
@@ -112,7 +114,7 @@ class PresetEditWidget(QWidget):
         """Check if content was modified."""
         return (self.editor.toPlainText() != self._original_content
                 or self.name_edit.text() != self._original_name
-                or self.desc_edit.text() != "")  # description changes count too
+                or self.desc_edit.text() != self._original_description)
 
     def _on_save(self) -> None:
         name = self.name_edit.text().strip()
@@ -126,6 +128,7 @@ class PresetEditWidget(QWidget):
         content = self.editor.toPlainText()
         self.save_requested.emit(name, desc, content)
         self._original_name = name
+        self._original_description = desc
         self._original_content = content
 
     def _on_back(self) -> None:

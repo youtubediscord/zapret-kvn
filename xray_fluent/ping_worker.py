@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import socket
 import time
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from .models import Node
+
+
+_MAX_PING_WORKERS = 16
 
 
 def tcp_ping(host: str, port: int, timeout: float = 2.0) -> int | None:
@@ -36,10 +40,52 @@ class PingWorker(QThread):
 
     def run(self) -> None:
         total = len(self._nodes)
-        for i, node in enumerate(self._nodes):
+        if total == 0:
+            self.completed.emit()
+            return
+
+        max_workers = min(_MAX_PING_WORKERS, total)
+        executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ping")
+        pending: dict[Future[int | None], str] = {}
+        iterator = iter(self._nodes)
+        completed = 0
+
+        try:
+            for _ in range(max_workers):
+                node = next(iterator, None)
+                if node is None:
+                    break
+                future = executor.submit(tcp_ping, node.server, node.port, self._timeout)
+                pending[future] = node.id
+
+            while pending and not self._cancelled:
+                done, _ = wait(tuple(pending), timeout=0.1, return_when=FIRST_COMPLETED)
+                if not done:
+                    continue
+
+                for future in done:
+                    node_id = pending.pop(future)
+                    try:
+                        ms = future.result()
+                    except Exception:
+                        ms = None
+
+                    completed += 1
+                    self.result.emit(node_id, ms)
+                    self.progress.emit(completed, total)
+
+                    if self._cancelled:
+                        break
+
+                    next_node = next(iterator, None)
+                    if next_node is not None:
+                        next_future = executor.submit(tcp_ping, next_node.server, next_node.port, self._timeout)
+                        pending[next_future] = next_node.id
+
             if self._cancelled:
-                break
-            self.progress.emit(i + 1, total)
-            ms = tcp_ping(node.server, node.port, timeout=self._timeout)
-            self.result.emit(node.id, ms)
+                for future in pending:
+                    future.cancel()
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
         self.completed.emit()

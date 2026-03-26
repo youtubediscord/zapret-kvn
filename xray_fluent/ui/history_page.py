@@ -238,14 +238,18 @@ class HistoryPage(QWidget):
 
 
 def _fmt_bytes(b: int) -> str:
-    if b < 1024:
-        return f"{b} B"
-    elif b < 1024 * 1024:
-        return f"{b / 1024:.1f} KB"
-    elif b < 1024 * 1024 * 1024:
-        return f"{b / 1024 / 1024:.1f} MB"
-    else:
-        return f"{b / 1024 / 1024 / 1024:.2f} GB"
+    value = float(max(0, int(b)))
+    units = ["B", "KB", "MB", "GB", "TB", "PB", "EB"]
+    unit_idx = 0
+    while value >= 1024.0 and unit_idx < len(units) - 1:
+        value /= 1024.0
+        unit_idx += 1
+
+    if unit_idx == 0:
+        return f"{int(value)} {units[unit_idx]}"
+    if unit_idx <= 2:
+        return f"{value:.1f} {units[unit_idx]}"
+    return f"{value:.2f} {units[unit_idx]}"
 
 
 def _fmt_datetime(iso: str) -> str:

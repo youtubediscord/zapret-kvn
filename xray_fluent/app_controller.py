@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import socket
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from logging.handlers import RotatingFileHandler
@@ -51,6 +52,29 @@ def _find_free_api_port(preferred: int | None = None, excluded: set[int] | None 
     raise RuntimeError(f"No free port in range {preferred}-{preferred + 100}")
 
 
+@dataclass(slots=True)
+class ActiveSessionSnapshot:
+    node_id: str | None
+    node_server: str
+    active_core: str
+    tun_mode: bool
+    tun_engine: str
+    proxy_enabled: bool
+    proxy_bypass_lan: bool
+    xray_path: str
+    singbox_path: str
+    socks_port: int
+    http_port: int
+    routing_signature: str
+    transition_signature: str
+    xray_layer_signature: str
+    tun_layer_signature: str
+    hybrid: bool
+    api_port: int
+    protect_ss_port: int
+    protect_ss_password: str
+
+
 class AppController(QObject):
     nodes_changed = pyqtSignal(object)
     selection_changed = pyqtSignal(object)
@@ -60,14 +84,17 @@ class AppController(QObject):
     settings_changed = pyqtSignal(object)
     log_line = pyqtSignal(str)
     status = pyqtSignal(str, str)
+    bulk_task_progress = pyqtSignal(str, int, int, bool)  # task, current, total, completed
     ping_updated = pyqtSignal(str, object)
     speed_updated = pyqtSignal(str, object, bool)  # node_id, speed_mbps, is_alive
+    speed_progress_updated = pyqtSignal(str, int)  # node_id, percent
     connectivity_test_done = pyqtSignal(bool, str, object)
     live_metrics_updated = pyqtSignal(object)
     xray_update_result = pyqtSignal(object)
     lock_state_changed = pyqtSignal(bool)
     passphrase_required = pyqtSignal()
     auto_switch_triggered = pyqtSignal(str)  # node name we're switching to
+    transition_state_changed = pyqtSignal(bool, str)
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -104,10 +131,16 @@ class AppController(QObject):
         self._connectivity_worker: ConnectivityTestWorker | None = None
         self._metrics_worker: LiveMetricsWorker | None = None
         self._xray_update_worker: XrayCoreUpdateWorker | None = None
+        self._ping_total = 0
+        self._ping_completed = 0
+        self._speed_total = 0
+        self._speed_completed = 0
         self._xray_update_silent = False
         self._reconnect_after_xray_update = False
         self._reconnecting = False
         self._connecting = False
+        self._disconnecting = False
+        self._cleaning_connection_state = False
         self._switching = False  # suppress intermediate UI updates during stop→start
         self._active_core: str = "xray"  # "xray" | "singbox" | "tun2socks"
         self._protect_ss_port: int = 0
@@ -121,6 +154,17 @@ class AppController(QObject):
         self._auto_switch_last_switch: float = 0.0  # monotonic timestamp of last auto-switch
         self._auto_switch_high_ticks: int = 0  # consecutive readings above threshold
         self._auto_switch_active_download: bool = False  # True after sustained traffic
+        self._auto_switch_cycle_attempts: int = 0
+        self._auto_switch_exhausted: bool = False
+        self._auto_switch_transitioning: bool = False
+        self._active_session: ActiveSessionSnapshot | None = None
+        self._desired_connected = False
+        self._transition_active = False
+        self._transition_scheduled = False
+        self._transition_pending = False
+        self._transition_reason = ""
+        self._transition_generation = 0
+        self._blocked_transition_signature = ""
 
         self.xray.log_received.connect(self._on_xray_log)
         self.xray.error.connect(self._on_xray_error)
@@ -142,6 +186,11 @@ class AppController(QObject):
         self._lock_timer = QTimer(self)
         self._lock_timer.setInterval(15_000)
         self._lock_timer.timeout.connect(self._check_auto_lock)
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(250)
+        self._save_timer.timeout.connect(self._flush_scheduled_save)
+        self._save_pending = False
 
     def load(self) -> bool:
         try:
@@ -186,7 +235,324 @@ class AppController(QObject):
         return self.storage.is_encrypted()
 
     def save(self) -> None:
+        if self._save_timer.isActive():
+            self._save_timer.stop()
+        self._save_pending = False
         self.storage.save(self.state)
+
+    def schedule_save(self) -> None:
+        self._save_pending = True
+        self._save_timer.start()
+
+    def _flush_scheduled_save(self) -> None:
+        if not self._save_pending:
+            return
+        self._save_pending = False
+        self.storage.save(self.state)
+
+    @staticmethod
+    def _signature(payload: object) -> str:
+        return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+    def _routing_signature(self, routing: RoutingSettings | None = None) -> str:
+        routing = routing or self.state.routing
+        return self._signature(routing.to_dict())
+
+    def _transition_signature(
+        self,
+        node: Node | None = None,
+        settings: AppSettings | None = None,
+        routing: RoutingSettings | None = None,
+    ) -> str:
+        settings = settings or self.state.settings
+        routing = routing or self.state.routing
+        node = node or self.selected_node
+        return self._signature(
+            {
+                "node_id": node.id if node else None,
+                "tun_mode": bool(settings.tun_mode),
+                "tun_engine": str(settings.tun_engine),
+                "proxy_enabled": bool(settings.enable_system_proxy),
+                "proxy_bypass_lan": bool(routing.bypass_lan),
+                "socks_port": int(settings.socks_port),
+                "http_port": int(settings.http_port),
+                "xray_path": str(settings.xray_path),
+                "singbox_path": str(settings.singbox_path),
+                "routing": routing.to_dict(),
+            }
+        )
+
+    def _xray_layer_signature(
+        self,
+        node: Node | None = None,
+        settings: AppSettings | None = None,
+        routing: RoutingSettings | None = None,
+    ) -> str:
+        settings = settings or self.state.settings
+        routing = routing or self.state.routing
+        node = node or self.selected_node
+        return self._signature(
+            {
+                "node_id": node.id if node else None,
+                "tun_mode": bool(settings.tun_mode),
+                "tun_engine": str(settings.tun_engine),
+                "socks_port": int(settings.socks_port),
+                "http_port": int(settings.http_port),
+                "xray_path": str(settings.xray_path),
+                "routing": routing.to_dict(),
+            }
+        )
+
+    def _tun_layer_signature(
+        self,
+        node: Node | None = None,
+        settings: AppSettings | None = None,
+        routing: RoutingSettings | None = None,
+    ) -> str:
+        settings = settings or self.state.settings
+        routing = routing or self.state.routing
+        node = node or self.selected_node
+        if not settings.tun_mode:
+            return ""
+        if settings.tun_engine == "tun2socks":
+            return self._signature(
+                {
+                    "mode": "tun2socks",
+                    "server": node.server if node else "",
+                    "socks_port": int(settings.socks_port),
+                }
+            )
+        if node is not None and needs_xray_hybrid(node):
+            return self._signature(
+                {
+                    "mode": "singbox-hybrid",
+                    "routing": routing.to_dict(),
+                    "xray_path": str(settings.xray_path),
+                    "singbox_path": str(settings.singbox_path),
+                }
+            )
+        return self._signature(
+            {
+                "mode": "singbox-native",
+                "node_id": node.id if node else None,
+                "node_outbound": (node.outbound if node else {}),
+                "routing": routing.to_dict(),
+                "xray_path": str(settings.xray_path),
+                "singbox_path": str(settings.singbox_path),
+            }
+        )
+
+    def _capture_active_session(
+        self,
+        node: Node,
+        *,
+        tun: bool,
+        core: str,
+        api_port: int,
+        protect_ss_port: int = 0,
+        protect_ss_password: str = "",
+    ) -> None:
+        settings = self.state.settings
+        routing = self.state.routing
+        hybrid = bool(tun and core == "singbox" and needs_xray_hybrid(node))
+        self._active_session = ActiveSessionSnapshot(
+            node_id=node.id,
+            node_server=node.server,
+            active_core=core,
+            tun_mode=bool(tun),
+            tun_engine=str(settings.tun_engine),
+            proxy_enabled=bool(settings.enable_system_proxy),
+            proxy_bypass_lan=bool(routing.bypass_lan),
+            xray_path=str(settings.xray_path),
+            singbox_path=str(settings.singbox_path),
+            socks_port=int(settings.socks_port),
+            http_port=int(settings.http_port),
+            routing_signature=self._routing_signature(routing),
+            transition_signature=self._transition_signature(node, settings, routing),
+            xray_layer_signature=self._xray_layer_signature(node, settings, routing),
+            tun_layer_signature=self._tun_layer_signature(node, settings, routing),
+            hybrid=hybrid,
+            api_port=int(api_port),
+            protect_ss_port=int(protect_ss_port),
+            protect_ss_password=str(protect_ss_password),
+        )
+        self._blocked_transition_signature = ""
+
+    def _clear_active_session(self) -> None:
+        self._active_session = None
+
+    def _apply_proxy_runtime_change(self) -> bool:
+        settings = self.state.settings
+        routing = self.state.routing
+        try:
+            if settings.enable_system_proxy:
+                self.proxy.enable(
+                    settings.http_port,
+                    settings.socks_port,
+                    bypass_lan=routing.bypass_lan,
+                )
+            else:
+                self.proxy.disable(restore_previous=True)
+        except Exception as exc:
+            self._set_connection_status(
+                "error",
+                f"Не удалось применить системный прокси: {exc}",
+                level="error",
+            )
+            return False
+
+        node = self.selected_node
+        if node is not None and self.connected:
+            self._capture_active_session(
+                node,
+                tun=False,
+                core="xray",
+                api_port=self._active_session.api_port if self._active_session else self._xray_api_port,
+            )
+        return True
+
+    def _needs_transition(self) -> bool:
+        if self._desired_connected:
+            node = self.selected_node
+            if node is None or self.locked:
+                return False
+            signature = self._transition_signature(node)
+            if signature == self._blocked_transition_signature:
+                return False
+            if not self.connected or self._active_session is None:
+                return True
+            return self._active_session.transition_signature != signature
+        return self.connected
+
+    def _can_apply_proxy_runtime_change(self, session: ActiveSessionSnapshot) -> bool:
+        settings = self.state.settings
+        if session.active_core != "xray" or session.tun_mode or settings.tun_mode:
+            return False
+        if session.xray_layer_signature != self._xray_layer_signature():
+            return False
+        return (
+            session.proxy_enabled != bool(settings.enable_system_proxy)
+            or session.proxy_bypass_lan != bool(self.state.routing.bypass_lan)
+        )
+
+    def _can_proxy_hot_swap(self, session: ActiveSessionSnapshot) -> bool:
+        settings = self.state.settings
+        if session.active_core != "xray" or session.tun_mode or settings.tun_mode:
+            return False
+        if session.socks_port != int(settings.socks_port) or session.http_port != int(settings.http_port):
+            return False
+        return session.xray_layer_signature != self._xray_layer_signature()
+
+    def _can_tun_hot_swap(self, session: ActiveSessionSnapshot) -> bool:
+        settings = self.state.settings
+        node = self.selected_node
+        if node is None or not settings.tun_mode or not session.tun_mode:
+            return False
+        if session.tun_engine != str(settings.tun_engine):
+            return False
+        if session.active_core == "tun2socks":
+            if settings.tun_engine != "tun2socks":
+                return False
+            return session.tun_layer_signature == self._tun_layer_signature(node, settings, self.state.routing)
+
+        if session.active_core != "singbox" or settings.tun_engine != "singbox":
+            return False
+        if not session.hybrid or not needs_xray_hybrid(node):
+            return False
+        if session.protect_ss_port <= 0 or not session.protect_ss_password:
+            return False
+        return session.tun_layer_signature == self._tun_layer_signature(node, settings, self.state.routing)
+
+    def _compute_transition_action(self) -> str | None:
+        if not self._desired_connected:
+            return "disconnect" if self.connected else None
+
+        node = self.selected_node
+        if node is None:
+            return None
+        if self.locked:
+            return None
+        if not self.connected or self._active_session is None:
+            return "connect"
+
+        session = self._active_session
+        if session.transition_signature == self._transition_signature(node):
+            return None
+        if self._can_apply_proxy_runtime_change(session):
+            return "proxy_update"
+        if self._can_tun_hot_swap(session):
+            return "tun_hot_swap"
+        if self._can_proxy_hot_swap(session):
+            return "proxy_hot_swap"
+        return "reconnect"
+
+    def _transition_status_text(self, action: str) -> str:
+        mapping = {
+            "connect": "Подключение...",
+            "disconnect": "Отключение...",
+            "proxy_update": "Применение системного прокси...",
+            "proxy_hot_swap": "Переключение сервера...",
+            "tun_hot_swap": "Переключение сервера...",
+            "reconnect": "Переподключение...",
+        }
+        return mapping.get(action, "Применение изменений...")
+
+    def _request_transition(self, reason: str) -> None:
+        self._blocked_transition_signature = ""
+        self._transition_pending = True
+        self._transition_reason = reason
+        self._transition_generation += 1
+        if self._transition_active or self._transition_scheduled:
+            return
+        self._transition_scheduled = True
+        QTimer.singleShot(0, self._drain_transition_queue)
+
+    def _drain_transition_queue(self) -> None:
+        self._transition_scheduled = False
+        if self._transition_active:
+            return
+
+        if not self._transition_pending and not self._needs_transition():
+            self.transition_state_changed.emit(False, "")
+            return
+
+        action = self._compute_transition_action()
+        if action is None:
+            self._transition_pending = False
+            self.transition_state_changed.emit(False, "")
+            return
+
+        self._transition_pending = False
+        reason = self._transition_reason or action
+        self._transition_active = True
+        self.transition_state_changed.emit(True, self._transition_status_text(action))
+        try:
+            ok = self._run_transition_action(action, reason)
+            if ok:
+                self._blocked_transition_signature = ""
+            else:
+                self._blocked_transition_signature = self._transition_signature()
+                self._desired_connected = self.connected
+        finally:
+            self._transition_active = False
+            if self._transition_pending or self._needs_transition():
+                self._transition_scheduled = True
+                QTimer.singleShot(0, self._drain_transition_queue)
+            else:
+                self.transition_state_changed.emit(False, "")
+
+    def _run_transition_action(self, action: str, reason: str) -> bool:
+        if action == "disconnect":
+            return self.disconnect_current()
+        if action == "connect":
+            return self.connect_selected()
+        if action == "proxy_update":
+            return self._apply_proxy_runtime_change()
+        if action == "proxy_hot_swap":
+            return self._restart_proxy_core(reason)
+        if action == "tun_hot_swap":
+            return self._hot_swap_node(reason)
+        return self._reconnect(reason)
 
     # ── Country detection helpers ──
 
@@ -330,23 +696,31 @@ class AppController(QObject):
         QTimer.singleShot(500, self._start_country_ip_resolution)
 
         if added:
-            # In TUN mode, hot-swap xray instead of full reconnect
-            if self._active_core in ("singbox", "tun2socks") and self.state.settings.tun_mode:
-                self._hot_swap_node("new node imported")
-            else:
-                self.connect_selected()
+            self._desired_connected = True
+            self._request_transition("new node imported")
 
         return added, errors
 
     def remove_nodes(self, node_ids: set[str]) -> None:
         if not node_ids:
             return
+        removed_selected = self.state.selected_node_id in node_ids
+        should_reconcile = removed_selected and (self.connected or self._desired_connected)
         self.state.nodes = [node for node in self.state.nodes if node.id not in node_ids]
-        if self.state.selected_node_id in node_ids:
+        if removed_selected:
             self.state.selected_node_id = self.state.nodes[0].id if self.state.nodes else None
+            self._reset_auto_switch_state(reset_cooldown=True, reset_cycle=True)
         self.nodes_changed.emit(self.state.nodes)
         self.selection_changed.emit(self.selected_node)
         self.save()
+        if not should_reconcile:
+            return
+        if self.state.selected_node_id is None:
+            self._desired_connected = False
+            self._request_transition("active node removed")
+            return
+        self._desired_connected = True
+        self._request_transition("active node removed")
 
     def update_node(self, node_id: str, updates: dict) -> bool:
         node = self._get_node_by_id(node_id)
@@ -427,18 +801,12 @@ class AppController(QObject):
         if self.state.selected_node_id == node_id:
             return
         self.state.selected_node_id = node_id
+        self._reset_auto_switch_state(reset_cooldown=True, reset_cycle=True)
         self.selection_changed.emit(self.selected_node)
-        self.save()
-
-        # Defer connection work so the UI updates immediately
-        if self.connected:
-            # In TUN mode, hot-swap node — keep sing-box TUN alive if possible
-            if self._active_core in ("singbox", "tun2socks") and self.state.settings.tun_mode:
-                QTimer.singleShot(0, lambda: self._hot_swap_node("node switched"))
-            else:
-                QTimer.singleShot(0, lambda: self._reconnect("node switched"))
-        else:
-            QTimer.singleShot(0, self.connect_selected)
+        self.schedule_save()
+        if self.connected or self._desired_connected:
+            self._desired_connected = True
+            self._request_transition("node switched")
 
     def _set_connection_status(self, phase: str, message: str, level: str | None = None) -> None:
         self.connection_status_changed.emit(phase, message)
@@ -458,6 +826,87 @@ class AppController(QObject):
         previous = self.connected
         self.connected = self._compute_connected_state()
         return previous, self.connected
+
+    def _reset_auto_switch_state(self, *, reset_cooldown: bool = False, reset_cycle: bool = True) -> None:
+        self._auto_switch_low_since = 0.0
+        self._auto_switch_high_ticks = 0
+        self._auto_switch_active_download = False
+        if reset_cycle:
+            self._auto_switch_cycle_attempts = 0
+            self._auto_switch_exhausted = False
+        if reset_cooldown:
+            self._auto_switch_last_switch = 0.0
+
+    def _cleanup_connection_runtime_state(
+        self,
+        *,
+        end_traffic_session: bool,
+        reset_auto_switch_cycle: bool,
+        reset_auto_switch_cooldown: bool,
+    ) -> None:
+        self._xray_api_port = 0
+        self._protect_ss_port = 0
+        self._protect_ss_password = ""
+        self._traffic_save_counter = 0
+        self._reset_auto_switch_state(
+            reset_cooldown=reset_auto_switch_cooldown,
+            reset_cycle=reset_auto_switch_cycle,
+        )
+        if end_traffic_session:
+            self._traffic_history.end_session()
+        from .process_traffic_collector import reset_connection_tracking
+        from .win_proc_monitor import clear_pid_cache
+        reset_connection_tracking()
+        clear_pid_cache()
+
+    def _stop_active_connection_processes(self, *, disable_proxy: bool) -> bool:
+        stopped = True
+
+        if self._active_core == "singbox":
+            if self.singbox.is_running:
+                stopped = self.singbox.stop() and stopped
+            if self.xray.is_running:
+                stopped = self.xray.stop() and stopped
+            if self.tun2socks.is_running:
+                stopped = self.tun2socks.stop() and stopped
+        elif self._active_core == "tun2socks":
+            if self.tun2socks.is_running:
+                stopped = self.tun2socks.stop() and stopped
+            if self.xray.is_running:
+                stopped = self.xray.stop() and stopped
+            if self.singbox.is_running:
+                stopped = self.singbox.stop() and stopped
+        else:
+            if self.xray.is_running:
+                stopped = self.xray.stop() and stopped
+            if self.singbox.is_running:
+                stopped = self.singbox.stop() and stopped
+            if self.tun2socks.is_running:
+                stopped = self.tun2socks.stop() and stopped
+
+        if disable_proxy and self.state.settings.enable_system_proxy:
+            self.proxy.disable(restore_previous=True)
+
+        return stopped
+
+    def _handle_unexpected_disconnect(self) -> None:
+        if self._cleaning_connection_state:
+            return
+        self._cleaning_connection_state = True
+        try:
+            self._cleanup_connection_runtime_state(
+                end_traffic_session=True,
+                reset_auto_switch_cycle=not self._auto_switch_transitioning,
+                reset_auto_switch_cooldown=True,
+            )
+            self._stop_active_connection_processes(disable_proxy=not self._reconnecting)
+            self._active_core = "xray"
+            self._clear_active_session()
+            if not self._reconnecting:
+                self._desired_connected = False
+        finally:
+            self._auto_switch_transitioning = False
+            self._cleaning_connection_state = False
 
     def connect_selected(self, allow_during_reconnect: bool = False) -> bool:
         if self._connecting:
@@ -480,6 +929,11 @@ class AppController(QObject):
             if not node:
                 self._set_connection_status("error", "Сначала выберите сервер.", level="warning")
                 return False
+
+            self._reset_auto_switch_state(
+                reset_cooldown=not self._auto_switch_transitioning,
+                reset_cycle=not self._auto_switch_transitioning,
+            )
 
             try:
                 self._xray_api_port = _find_free_api_port(
@@ -596,6 +1050,14 @@ class AppController(QObject):
 
             node.last_used_at = datetime.now(timezone.utc).isoformat()
             self._set_connection_status("running", f"Подключено: {node.name}" + (" (TUN)" if tun else ""), level="success")
+            self._capture_active_session(
+                node,
+                tun=tun,
+                core=self._active_core,
+                api_port=self._xray_api_port,
+                protect_ss_port=self._protect_ss_port,
+                protect_ss_password=self._protect_ss_password,
+            )
             self.save()
             node_name = node.name if node else "unknown"
             self._traffic_history.start_session(node_name, self._active_core)
@@ -604,47 +1066,94 @@ class AppController(QObject):
             self._connecting = False
 
     def disconnect_current(self, disable_proxy: bool = True, emit_status: bool = True) -> bool:
-        self._xray_api_port = 0
-        self._auto_switch_low_since = 0.0
-        self._auto_switch_high_ticks = 0
-        self._auto_switch_active_download = False
-        self._traffic_history.end_session()
-        from .process_traffic_collector import reset_connection_tracking
-        from .win_proc_monitor import clear_pid_cache
-        reset_connection_tracking()
-        clear_pid_cache()
-        if self._active_core == "singbox":
-            if emit_status:
+        self._disconnecting = True
+        try:
+            self._cleanup_connection_runtime_state(
+                end_traffic_session=True,
+                reset_auto_switch_cycle=not self._auto_switch_transitioning,
+                reset_auto_switch_cooldown=not self._reconnecting and not self._auto_switch_transitioning,
+            )
+            if emit_status and self._active_core in ("singbox", "tun2socks"):
                 self.status.emit("info", "Остановка VPN...")
-            stopped = self.singbox.stop()
-            if self.xray.is_running:
-                self.xray.stop()
-            self._protect_ss_port = 0
-            self._protect_ss_password = ""
-        elif self._active_core == "tun2socks":
+            stopped = self._stop_active_connection_processes(disable_proxy=disable_proxy)
+            if stopped:
+                self._active_core = "xray"
+                self._clear_active_session()
             if emit_status:
-                self.status.emit("info", "Остановка VPN...")
-            stopped = self.tun2socks.stop()
-            if self.xray.is_running:
-                self.xray.stop()
-        else:
-            stopped = self.xray.stop()
-            if disable_proxy and self.state.settings.enable_system_proxy:
+                if stopped:
+                    self._set_connection_status("idle", "Отключено", level="info")
+                else:
+                    self._set_connection_status("error", "Не удалось корректно остановить подключение", level="error")
+            return stopped
+        finally:
+            self._disconnecting = False
+
+    def _restart_proxy_core(self, reason: str) -> bool:
+        node = self.selected_node
+        if node is None:
+            return False
+
+        self._switching = True
+        try:
+            self._log(f"[proxy-hot-swap] {reason}")
+            self._set_connection_status("starting", f"Переключение на {node.name}...", level="info")
+            self._stop_metrics_worker()
+            if self.xray.is_running and not self.xray.stop():
+                self._set_connection_status("error", "Не удалось остановить предыдущий процесс Xray", level="error")
+                return False
+
+            config = build_xray_config(node, self.state.routing, self.state.settings, api_port=self._xray_api_port)
+            ok = self.xray.start(self.state.settings.xray_path, config)
+            if not ok:
+                self._handle_unexpected_disconnect()
+                return False
+
+            if self.state.settings.enable_system_proxy:
+                try:
+                    self.proxy.enable(
+                        self.state.settings.http_port,
+                        self.state.settings.socks_port,
+                        bypass_lan=self.state.routing.bypass_lan,
+                    )
+                except Exception as exc:
+                    self.xray.stop()
+                    self._set_connection_status(
+                        "error",
+                        f"Не удалось включить системный прокси: {exc}",
+                        level="error",
+                    )
+                    self._handle_unexpected_disconnect()
+                    return False
+            else:
                 self.proxy.disable(restore_previous=True)
-        if emit_status:
-            self._set_connection_status("idle", "Отключено", level="info")
-        return stopped
+
+            node.last_used_at = datetime.now(timezone.utc).isoformat()
+            self._capture_active_session(
+                node,
+                tun=False,
+                core="xray",
+                api_port=self._xray_api_port,
+            )
+            self._set_connection_status("running", f"Переключено: {node.name}", level="success")
+            self.save()
+            return True
+        finally:
+            self._switching = False
+            _, self.connected = self._refresh_connected_state()
+            self.connection_changed.emit(self.connected)
+            if self.connected:
+                self._start_metrics_worker()
+            else:
+                self._stop_metrics_worker()
 
     @property
     def traffic_history(self) -> TrafficHistoryStorage:
         return self._traffic_history
 
     def toggle_connection(self) -> None:
-        """Emergency override for tray icon."""
-        if self.connected:
-            self.disconnect_current()
-        else:
-            self.connect_selected()
+        current_target = self._desired_connected if (self._transition_active or self._transition_pending) else self.connected
+        self._desired_connected = not current_target
+        self._request_transition("toggle connection")
 
     def switch_next_node(self) -> None:
         if not self.state.nodes:
@@ -677,17 +1186,23 @@ class AppController(QObject):
             routing.mode = "rule"
         self.state.routing = routing
         self.routing_changed.emit(self.state.routing)
-        self.save()
+        self.schedule_save()
 
-        if self.connected:
-            self._reconnect("routing changed")
+        if self.connected or self._desired_connected:
+            self._request_transition("routing changed")
 
     def update_settings(self, settings: AppSettings) -> None:
-        old_launch = self.state.settings.launch_on_startup
-        old_tun = self.state.settings.tun_mode
+        old_settings = self.state.settings
+        old_launch = old_settings.launch_on_startup
+        old_tun = old_settings.tun_mode
+        old_tun_engine = old_settings.tun_engine
+        ports_changed = (
+            old_settings.socks_port != settings.socks_port
+            or old_settings.http_port != settings.http_port
+        )
         self.state.settings = settings
         self.settings_changed.emit(self.state.settings)
-        self.save()
+        self.schedule_save()
 
         if old_launch != settings.launch_on_startup:
             try:
@@ -695,19 +1210,20 @@ class AppController(QObject):
             except Exception as exc:
                 self.status.emit("error", f"Ошибка настройки автозапуска: {exc}")
 
-        if old_tun != settings.tun_mode and self.connected:
-            self._reconnect("TUN mode toggled")
-            return
-
-        if not settings.tun_mode:
-            if self.connected and not settings.enable_system_proxy:
-                self.proxy.disable(restore_previous=True)
-            elif self.connected and settings.enable_system_proxy:
-                self.proxy.enable(
-                    settings.http_port,
-                    settings.socks_port,
-                    bypass_lan=self.state.routing.bypass_lan,
-                )
+        if self.connected or self._desired_connected:
+            if old_tun != settings.tun_mode:
+                self._desired_connected = True
+                self._request_transition("TUN mode toggled")
+                return
+            if settings.tun_mode and old_tun_engine != settings.tun_engine:
+                self._desired_connected = True
+                self._request_transition("TUN engine changed")
+                return
+            if ports_changed:
+                self._desired_connected = True
+                self._request_transition("proxy ports changed")
+                return
+            self._request_transition("settings changed")
 
     def ping_nodes(self, node_ids: set[str] | None = None) -> None:
         nodes = self.state.nodes
@@ -720,9 +1236,12 @@ class AppController(QObject):
             self._ping_worker.cancel()
             self._ping_worker.wait(500)
 
+        self._ping_total = len(nodes)
+        self._ping_completed = 0
+        self.bulk_task_progress.emit("ping", 0, self._ping_total, False)
         self._ping_worker = PingWorker(nodes)
         self._ping_worker.result.connect(self._on_ping_result)
-        self._ping_worker.progress.connect(lambda cur, tot: self.status.emit("info", f"Пинг {cur}/{tot}..."))
+        self._ping_worker.progress.connect(self._on_ping_progress)
         self._ping_worker.completed.connect(self._on_ping_complete)
         self._ping_worker.start()
 
@@ -748,13 +1267,17 @@ class AppController(QObject):
         )
         xray_path = str(resolved) if resolved else self.state.settings.xray_path
 
+        self._speed_total = len(nodes)
+        self._speed_completed = 0
+        self.bulk_task_progress.emit("speed", 0, self._speed_total, False)
         self._speed_worker = SpeedTestWorker(
             nodes,
             xray_path=xray_path,
             routing=self.state.routing,
         )
         self._speed_worker.result.connect(self._on_speed_result)
-        self._speed_worker.progress.connect(lambda cur, tot: self.status.emit("info", f"Тест скорости {cur}/{tot}..."))
+        self._speed_worker.progress.connect(self._on_speed_progress)
+        self._speed_worker.node_progress.connect(self._on_speed_node_progress)
         self._speed_worker.completed.connect(self._on_speed_complete)
         self._speed_worker.start()
 
@@ -801,8 +1324,15 @@ class AppController(QObject):
             return
 
         if apply_update and self.connected:
+            stopped = self.disconnect_current()
+            if not stopped:
+                self._reconnect_after_xray_update = False
+                if silent:
+                    self._log("[core-update] update cancelled: failed to stop active connection")
+                else:
+                    self.status.emit("error", "Не удалось остановить активное подключение перед обновлением Xray")
+                return
             self._reconnect_after_xray_update = True
-            self.disconnect_current()
         else:
             self._reconnect_after_xray_update = False
 
@@ -881,6 +1411,7 @@ class AppController(QObject):
             return
         self.locked = True
         self.lock_state_changed.emit(True)
+        self._desired_connected = False
         self.disconnect_current()
 
     def build_diagnostics(self) -> Path:
@@ -890,7 +1421,8 @@ class AppController(QObject):
 
     def auto_connect_if_needed(self) -> None:
         if self.state.settings.auto_connect_last and self.selected_node is not None and not self.locked:
-            self.connect_selected()
+            self._desired_connected = True
+            self._request_transition("auto connect")
 
     def _log(self, line: str) -> None:
         """Send a log line to the UI and write it to the log file."""
@@ -935,10 +1467,14 @@ class AppController(QObject):
             self._stop_metrics_worker()
             if was_connected and not self._switching:
                 self.live_metrics_updated.emit({"down_bps": 0.0, "up_bps": 0.0, "latency_ms": None})
+                if not self._disconnecting:
+                    self._handle_unexpected_disconnect()
         if not is_connected and self._active_core == "xray" and self.state.settings.enable_system_proxy and not self._reconnecting:
             self.proxy.disable(restore_previous=True)
 
     def _on_ping_result(self, node_id: str, ping_ms: int | None) -> None:
+        if self.sender() is not self._ping_worker:
+            return
         for node in self.state.nodes:
             if node.id == node_id:
                 node.ping_ms = ping_ms
@@ -952,10 +1488,22 @@ class AppController(QObject):
                 break
         self.ping_updated.emit(node_id, ping_ms)
 
+    def _on_ping_progress(self, current: int, total: int) -> None:
+        if self.sender() is not self._ping_worker:
+            return
+        self._ping_completed = current
+        self.bulk_task_progress.emit("ping", current, total, False)
+
     def _on_ping_complete(self) -> None:
+        if self.sender() is not self._ping_worker:
+            return
+        self.bulk_task_progress.emit("ping", self._ping_completed, self._ping_total, True)
+        self._ping_worker = None
         self.save()
 
     def _on_speed_result(self, node_id: str, speed_mbps: float | None, is_alive: bool) -> None:
+        if self.sender() is not self._speed_worker:
+            return
         for node in self.state.nodes:
             if node.id == node_id:
                 node.speed_mbps = speed_mbps
@@ -969,11 +1517,29 @@ class AppController(QObject):
                 break
         self.speed_updated.emit(node_id, speed_mbps, is_alive)
 
+    def _on_speed_progress(self, current: int, total: int) -> None:
+        if self.sender() is not self._speed_worker:
+            return
+        self._speed_completed = current
+        self.bulk_task_progress.emit("speed", current, total, False)
+
+    def _on_speed_node_progress(self, node_id: str, percent: int) -> None:
+        if self.sender() is not self._speed_worker:
+            return
+        self.speed_progress_updated.emit(node_id, max(0, min(100, int(percent))))
+
     def _on_speed_complete(self) -> None:
+        if self.sender() is not self._speed_worker:
+            return
+        self.bulk_task_progress.emit("speed", self._speed_completed, self._speed_total, True)
+        self._speed_worker = None
         self.status.emit("success", "Тест скорости завершён")
         self.save()
 
     def _on_connectivity_result(self, ok: bool, message: str, elapsed_ms: int | None) -> None:
+        if self.sender() is not self._connectivity_worker:
+            return
+        self._connectivity_worker = None
         if ok and elapsed_ms is not None:
             text = f"Подключение в порядке: {elapsed_ms} мс"
             self.status.emit("success", text)
@@ -1026,6 +1592,8 @@ class AppController(QObject):
             return
         if len(self.state.nodes) < 2:
             return
+        if self._auto_switch_exhausted:
+            return
 
         now = time.monotonic()
         threshold_bps = settings.auto_switch_threshold_kbps * 1024.0
@@ -1069,6 +1637,15 @@ class AppController(QObject):
         if now - self._auto_switch_last_switch < settings.auto_switch_cooldown_sec:
             return
 
+        max_attempts = max(1, len(self.state.nodes) - 1)
+        if self._auto_switch_cycle_attempts >= max_attempts:
+            self._auto_switch_exhausted = True
+            self._auto_switch_low_since = 0.0
+            self._auto_switch_active_download = False
+            self.status.emit("warning", "Автопереключение остановлено: все серверы уже проверены")
+            self._log("[auto-switch] exhausted all nodes for current session")
+            return
+
         # --- Trigger auto-switch ---
         self._auto_switch_low_since = 0.0
         self._auto_switch_last_switch = now
@@ -1078,6 +1655,8 @@ class AppController(QObject):
         if not next_node:
             return
 
+        self._auto_switch_cycle_attempts += 1
+        self._auto_switch_transitioning = True
         self._log(f"[auto-switch] speed {down_bps / 1024:.0f} KB/s < {settings.auto_switch_threshold_kbps} KB/s "
                    f"for {low_duration:.0f}s → switching to {next_node.name}")
         self.auto_switch_triggered.emit(next_node.name)
@@ -1086,11 +1665,8 @@ class AppController(QObject):
         self.state.selected_node_id = next_node.id
         self.selection_changed.emit(next_node)
         self.save()
-
-        if self._active_core in ("singbox", "tun2socks") and settings.tun_mode:
-            QTimer.singleShot(0, lambda: self._hot_swap_node("auto-switch: speed drop"))
-        else:
-            QTimer.singleShot(0, lambda: self._reconnect("auto-switch: speed drop"))
+        self._desired_connected = True
+        self._request_transition("auto-switch: speed drop")
 
     def _get_next_node_for_auto_switch(self) -> Node | None:
         """Pick next node: prefer alive nodes with best speed, fall back to round-robin."""
@@ -1116,11 +1692,13 @@ class AppController(QObject):
             return min(candidates, key=lambda n: n.ping_ms if n.ping_ms is not None else float('inf'))
 
         # Last resort: round-robin to next node
-        current_idx = 0
+        current_idx: int | None = None
         for idx, node in enumerate(nodes):
             if node.id == current_id:
                 current_idx = idx
                 break
+        if current_idx is None:
+            return nodes[0]
         next_idx = (current_idx + 1) % len(nodes)
         if nodes[next_idx].id == current_id:
             return None
@@ -1152,7 +1730,8 @@ class AppController(QObject):
 
         if self._reconnect_after_xray_update:
             self._reconnect_after_xray_update = False
-            self.connect_selected()
+            self._desired_connected = True
+            self._request_transition("core update reconnect")
 
         self._xray_update_silent = False
 
@@ -1164,13 +1743,20 @@ class AppController(QObject):
             self._log("[network] ignoring change in TUN mode")
             return
         if self.connected and self.state.settings.reconnect_on_network_change:
-            self._reconnect("network changed")
+            self._desired_connected = True
+            self._request_transition("network changed")
 
-    def _hot_swap_node(self, reason: str) -> None:
+    def _hot_swap_node(self, reason: str) -> bool:
         """Switch node in TUN mode. Restarts only xray; TUN adapter stays alive."""
         node = self.selected_node
-        if not node:
-            return
+        session = self._active_session
+        if not node or session is None:
+            self._auto_switch_transitioning = False
+            return False
+
+        self._xray_api_port = session.api_port
+        self._protect_ss_port = session.protect_ss_port
+        self._protect_ss_password = session.protect_ss_password
 
         # tun2socks mode: always hot-swap xray only
         if self._active_core == "tun2socks":
@@ -1184,28 +1770,35 @@ class AppController(QObject):
                 ok = self.xray.start(self.state.settings.xray_path, config)
                 if ok:
                     node.last_used_at = datetime.now(timezone.utc).isoformat()
+                    self._capture_active_session(
+                        node,
+                        tun=True,
+                        core="tun2socks",
+                        api_port=self._xray_api_port,
+                    )
                     self._set_connection_status("running", f"Переключено: {node.name} (TUN)", level="success")
                     self.save()
                 else:
                     self._log("[hot-swap] xray restart failed")
-                    self._set_connection_status("error", "Не удалось переключить сервер", level="error")
+                    self._set_connection_status("error", "Не удалось переключить сервер, подключение остановлено", level="error")
+                    self._handle_unexpected_disconnect()
+                return ok
             finally:
                 self._switching = False
+                self._auto_switch_transitioning = False
                 _, self.connected = self._refresh_connected_state()
                 self.connection_changed.emit(self.connected)
                 if self.connected:
                     self._start_metrics_worker()
                 else:
                     self._stop_metrics_worker()
-            return
 
         # sing-box mode
         hybrid_now = self.xray.is_running
         hybrid_next = needs_xray_hybrid(node)
 
         if hybrid_now != hybrid_next:
-            self._reconnect(f"{reason} (mode change)")
-            return
+            return self._reconnect(f"{reason} (mode change)")
 
         if hybrid_next:
             # Hybrid: restart only xray, sing-box TUN stays alive
@@ -1214,18 +1807,36 @@ class AppController(QObject):
                 self._log(f"[hot-swap] {reason} — restarting xray only, sing-box TUN stays up")
                 self._set_connection_status("starting", f"Переключение на {node.name}...", level="info")
                 self.xray.stop()
-                xray_cfg = build_xray_hybrid_config(node, self.state.routing, self.state.settings, self._protect_ss_port, self._protect_ss_password, api_port=self._xray_api_port)
+                xray_cfg = build_xray_hybrid_config(
+                    node,
+                    self.state.routing,
+                    self.state.settings,
+                    session.protect_ss_port,
+                    session.protect_ss_password,
+                    api_port=session.api_port,
+                )
                 xray_cfg["log"] = {"loglevel": "error"}
                 ok = self.xray.start(self.state.settings.xray_path, xray_cfg)
                 if ok:
                     node.last_used_at = datetime.now(timezone.utc).isoformat()
+                    self._capture_active_session(
+                        node,
+                        tun=True,
+                        core="singbox",
+                        api_port=session.api_port,
+                        protect_ss_port=session.protect_ss_port,
+                        protect_ss_password=session.protect_ss_password,
+                    )
                     self._set_connection_status("running", f"Переключено: {node.name} (TUN)", level="success")
                     self.save()
                 else:
                     self._log("[hot-swap] xray restart failed")
-                    self._set_connection_status("error", "Не удалось переключить сервер", level="error")
+                    self._set_connection_status("error", "Не удалось переключить сервер, подключение остановлено", level="error")
+                    self._handle_unexpected_disconnect()
+                return ok
             finally:
                 self._switching = False
+                self._auto_switch_transitioning = False
                 _, self.connected = self._refresh_connected_state()
                 self.connection_changed.emit(self.connected)
                 if self.connected:
@@ -1234,11 +1845,13 @@ class AppController(QObject):
                     self._stop_metrics_worker()
         else:
             # Native: sing-box holds the outbound, must do full reconnect
-            self._reconnect(f"{reason} (native mode)")
+            return self._reconnect(f"{reason} (native mode)")
 
-    def _reconnect(self, reason: str) -> None:
+        return False
+
+    def _reconnect(self, reason: str) -> bool:
         if self._reconnecting:
-            return
+            return False
         self._reconnecting = True
         self._switching = True
         try:
@@ -1249,14 +1862,16 @@ class AppController(QObject):
                 self._set_connection_status("error", "Не удалось остановить предыдущий процесс Xray", level="error")
                 if self.state.settings.enable_system_proxy:
                     self.proxy.disable(restore_previous=True)
-                return
+                return False
 
             ok = self.connect_selected(allow_during_reconnect=True)
             if not ok and self.state.settings.enable_system_proxy:
                 self.proxy.disable(restore_previous=True)
+            return ok
         finally:
             self._reconnecting = False
             self._switching = False
+            self._auto_switch_transitioning = False
             _, self.connected = self._refresh_connected_state()
             self.connection_changed.emit(self.connected)
             if self.connected:

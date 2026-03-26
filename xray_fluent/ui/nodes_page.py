@@ -1,33 +1,41 @@
 from __future__ import annotations
 
-from datetime import datetime
 from typing import cast
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSize
-from PyQt6.QtGui import QBrush, QColor, QCursor, QKeyEvent, QKeySequence, QShortcut
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSize, QItemSelectionModel
+from PyQt6.QtGui import QCursor, QKeyEvent, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QHBoxLayout, QHeaderView,
-    QStackedWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QStackedWidget, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     ComboBox,
     FluentIcon as FIF,
+    IndeterminateProgressRing,
+    ProgressBar,
     PrimaryToolButton,
     SearchLineEdit,
     SubtitleLabel,
-    TableWidget,
+    TableView,
     TransparentToolButton,
     VerticalSeparator,
 )
 from qfluentwidgets import RoundMenu, Action
 
-from ..country_flags import get_flag_icon
 from ..models import Node
 from .node_detail_widget import NodeDetailWidget
+from .nodes_table_model import NodesTableModel
 
-_RED_BRUSH = QBrush(QColor(220, 50, 50))
-_GREEN_BRUSH = QBrush(QColor(76, 175, 80))
-_ORANGE_BRUSH = QBrush(QColor(255, 152, 0))
+_COLUMN_WIDTHS = {
+    1: 96,   # Тип
+    3: 84,   # Порт
+    4: 140,  # Группа
+    5: 160,  # Теги
+    6: 92,   # Пинг
+    7: 110,  # Скорость
+    8: 84,   # Статус
+    9: 156,  # Последнее использование
+}
 
 _SORT_KEYS = ["Вручную", "Имя", "Группа", "Тип", "Пинг", "Скорость", "Последнее использование"]
 
@@ -60,10 +68,13 @@ class NodesPage(QWidget):
 
         self._nodes: list[Node] = []
         self._visible_node_ids: list[str] = []
-        self._id_to_row: dict[str, int] = {}
+        self._id_to_node: dict[str, Node] = {}
+        self._search_haystacks: dict[str, str] = {}
         self._sort_ascending = True
         self._cached_groups: frozenset[str] = frozenset()
         self._cached_tags: frozenset[str] = frozenset()
+        self._pending_ping_ids: set[str] = set()
+        self._active_speed_progress: dict[str, int] = {}
 
         # Stack: page 0 = server list, page 1 = node detail
         self._stack = QStackedWidget(self)
@@ -184,21 +195,19 @@ class NodesPage(QWidget):
         root.addLayout(toolbar)
 
         # --- Table ---
-        self.table = TableWidget(self)
-        self.table.setColumnCount(10)
-        self.table.setHorizontalHeaderLabels(
-            ["Имя", "Тип", "Сервер", "Порт", "Группа", "Теги", "Пинг", "Скорость", "Статус", "Последнее использование"]
-        )
+        self.table = TableView(self)
+        self._table_model = NodesTableModel(self)
+        self.table.setModel(self._table_model)
         vertical_header = cast(QHeaderView, self.table.verticalHeader())
         vertical_header.setVisible(False)
 
         horizontal_header = cast(QHeaderView, self.table.horizontalHeader())
-        horizontal_header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        horizontal_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        horizontal_header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        horizontal_header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
-        horizontal_header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
-        horizontal_header.setSectionResizeMode(8, QHeaderView.ResizeMode.ResizeToContents)
+        horizontal_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        horizontal_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        horizontal_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        for col, width in _COLUMN_WIDTHS.items():
+            horizontal_header.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
+            self.table.setColumnWidth(col, width)
         horizontal_header.setSectionsClickable(True)
         horizontal_header.sectionClicked.connect(self._on_header_clicked)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -208,13 +217,15 @@ class NodesPage(QWidget):
         self.table.setIconSize(QSize(20, 14))
 
         # Prevent deselection on empty area click
-        self.table._orig_mousePressEvent = self.table.mousePressEvent
+        orig_mouse_press = self.table.mousePressEvent
+
         def _no_deselect_mouse_press(event):
             if event.button() == Qt.MouseButton.LeftButton:
                 index = self.table.indexAt(event.pos())
                 if not index.isValid():
                     return
-            self.table._orig_mousePressEvent(event)
+            orig_mouse_press(event)
+
         self.table.mousePressEvent = _no_deselect_mouse_press
 
         root.addWidget(self.table, 1)
@@ -252,7 +263,7 @@ class NodesPage(QWidget):
         self.delete_btn.clicked.connect(self._on_delete_selected)
         self.move_up_btn.clicked.connect(self._on_move_up)
         self.move_down_btn.clicked.connect(self._on_move_down)
-        self.table.itemSelectionChanged.connect(self._emit_selection)
+        self.table.selectionModel().selectionChanged.connect(lambda *_: self._emit_selection())
         self.table.doubleClicked.connect(self._on_double_click)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
 
@@ -264,40 +275,30 @@ class NodesPage(QWidget):
 
     def set_nodes(self, nodes: list[Node], selected_id: str | None = None) -> None:
         self._nodes = list(nodes)
+        self._id_to_node = {node.id: node for node in self._nodes}
+        self._search_haystacks = {
+            node.id: " ".join([node.name, node.scheme, node.server, node.group, " ".join(node.tags)]).lower()
+            for node in self._nodes
+        }
         self._rebuild_filter_combos()
         self._reload()
-        if selected_id:
+        if selected_id and selected_id not in self._selected_ids():
             self._select_node(selected_id)
 
     def update_ping(self, node_id: str, ping_ms: int | None) -> None:
-        row = self._id_to_row.get(node_id)
-        if row is None:
-            return
-        text = "--" if ping_ms is None else f"{ping_ms} ms"
-        item = QTableWidgetItem(text)
-        if ping_ms is not None:
-            item.setToolTip(f"Пинг: {ping_ms} ms")
-        self.table.setItem(row, 6, item)
+        self._pending_ping_ids.discard(node_id)
+        self._table_model.set_ping_busy(node_id, False)
+        self._table_model.refresh_ping(node_id)
+        self._apply_activity_widgets()
 
     def update_speed(self, node_id: str, speed_mbps: float | None) -> None:
-        row = self._id_to_row.get(node_id)
-        if row is None:
-            return
-        text = "--" if speed_mbps is None else f"{speed_mbps:.1f} MB/s"
-        self.table.setItem(row, 7, QTableWidgetItem(text))
+        self._active_speed_progress.pop(node_id, None)
+        self._table_model.set_speed_busy(node_id, False)
+        self._table_model.refresh_speed(node_id)
+        self._apply_activity_widgets()
 
     def update_alive_status(self, node_id: str, is_alive: bool | None) -> None:
-        row = self._id_to_row.get(node_id)
-        if row is None:
-            return
-        node = next((n for n in self._nodes if n.id == node_id), None)
-        status_item = self._make_status_item(node) if node else QTableWidgetItem("--")
-        if is_alive == False:
-            for col in range(self.table.columnCount()):
-                item = self.table.item(row, col)
-                if item:
-                    item.setForeground(_RED_BRUSH)
-        self.table.setItem(row, 8, status_item)
+        self._table_model.refresh_alive_status(node_id)
 
     def refresh_detail(self) -> None:
         """Refresh detail view if it is currently visible."""
@@ -354,9 +355,7 @@ class NodesPage(QWidget):
             if tag_filter != "Все теги" and tag_filter not in node.tags:
                 continue
             if query:
-                haystack = " ".join(
-                    [node.name, node.scheme, node.server, node.group, " ".join(node.tags)]
-                ).lower()
+                haystack = self._search_haystacks.get(node.id, "")
                 if query not in haystack:
                     continue
             filtered.append(node)
@@ -364,61 +363,129 @@ class NodesPage(QWidget):
         sort_key = self.sort_combo.currentText()
         filtered = self._sort_nodes(filtered, sort_key, self._sort_ascending)
 
+        self._visible_node_ids = [node.id for node in filtered]
+
         self.table.setUpdatesEnabled(False)
-        self.table.blockSignals(True)
-        self.table.setRowCount(len(filtered))
-        self._visible_node_ids = []
-        self._id_to_row = {}
-
-        for row, node in enumerate(filtered):
-            self._visible_node_ids.append(node.id)
-            self._id_to_row[node.id] = row
-            name_item = QTableWidgetItem(node.name or "Без имени")
-            icon = get_flag_icon(node.country_code)
-            if icon:
-                name_item.setIcon(icon)
-            self.table.setItem(row, 0, name_item)
-            self.table.setItem(row, 1, QTableWidgetItem(node.scheme.upper()))
-            self.table.setItem(row, 2, QTableWidgetItem(node.server))
-            self.table.setItem(row, 3, QTableWidgetItem(str(node.port)))
-            self.table.setItem(row, 4, QTableWidgetItem(node.group))
-            self.table.setItem(row, 5, QTableWidgetItem(", ".join(node.tags)))
-
-            # Column 6 — Ping
-            ping_text = "--" if node.ping_ms is None else f"{node.ping_ms} ms"
-            ping_item = QTableWidgetItem(ping_text)
-            if node.ping_ms is not None:
-                ping_item.setToolTip(f"Пинг: {node.ping_ms} ms")
-            if node.is_alive == False:
-                ping_item.setForeground(_RED_BRUSH)
-            self.table.setItem(row, 6, ping_item)
-
-            # Column 7 — Speed
-            speed_text = "--" if node.speed_mbps is None else f"{node.speed_mbps:.1f} MB/s"
-            self.table.setItem(row, 7, QTableWidgetItem(speed_text))
-
-            # Column 8 — Status
-            status_item = self._make_status_item(node)
-            self.table.setItem(row, 8, status_item)
-
-            # Column 9 — Last used
-            self.table.setItem(row, 9, QTableWidgetItem(self._format_time(node.last_used_at)))
-
-            # Red highlight for dead servers
-            if node.is_alive == False:
-                for col in range(self.table.columnCount()):
-                    item = self.table.item(row, col)
-                    if item:
-                        item.setForeground(_RED_BRUSH)
-
-        self.table.blockSignals(False)
-        self.table.setUpdatesEnabled(True)
-
-        if prev_selected:
+        self._table_model.set_nodes(filtered)
+        selection_model = self.table.selectionModel()
+        if selection_model is not None:
+            selection_model.blockSignals(True)
+            selection_model.clearSelection()
             for row, nid in enumerate(self._visible_node_ids):
-                if nid in prev_selected:
-                    self.table.selectRow(row)
-                    break
+                if nid not in prev_selected:
+                    continue
+                index = self._table_model.index(row, 0)
+                if not index.isValid():
+                    continue
+                selection_model.select(
+                    index,
+                    QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows,
+                )
+            selection_model.blockSignals(False)
+        self.table.setUpdatesEnabled(True)
+        self._apply_activity_widgets()
+
+        self._emit_selection()
+
+    def start_ping_activity(self, node_ids: set[str] | None = None) -> None:
+        targets = set(node_ids) if node_ids else {node.id for node in self._nodes}
+        if not targets:
+            return
+        self._pending_ping_ids.clear()
+        self._table_model.clear_ping_busy()
+        self._pending_ping_ids = targets
+        for node_id in targets:
+            self._table_model.set_ping_busy(node_id, True)
+        self._apply_activity_widgets()
+
+    def start_speed_activity(self) -> None:
+        self._active_speed_progress.clear()
+        self._table_model.clear_speed_busy()
+        self._apply_activity_widgets()
+
+    def update_speed_progress(self, node_id: str, percent: int) -> None:
+        self._active_speed_progress[node_id] = max(0, min(100, int(percent)))
+        self._table_model.set_speed_busy(node_id, True)
+        self._apply_activity_widgets()
+
+    def finish_ping_activity(self) -> None:
+        if not self._pending_ping_ids:
+            return
+        self._pending_ping_ids.clear()
+        self._table_model.clear_ping_busy()
+        self._apply_activity_widgets()
+
+    def finish_speed_activity(self) -> None:
+        if not self._active_speed_progress:
+            return
+        self._active_speed_progress.clear()
+        self._table_model.clear_speed_busy()
+        self._apply_activity_widgets()
+
+    def _apply_activity_widgets(self) -> None:
+        for row, node_id in enumerate(self._visible_node_ids):
+            self._sync_activity_widget(row, 6, node_id in self._pending_ping_ids)
+            self._sync_speed_widget(row, node_id)
+
+    def _sync_activity_widget(self, row: int, column: int, active: bool) -> None:
+        index = self._table_model.index(row, column)
+        if not index.isValid():
+            return
+
+        existing = self.table.indexWidget(index)
+        if not active:
+            if existing is not None:
+                self.table.setIndexWidget(index, None)
+                existing.deleteLater()
+            return
+
+        if existing is not None:
+            return
+
+        container = QWidget(self.table)
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        ring = IndeterminateProgressRing(container)
+        ring.setFixedSize(16, 16)
+        ring.setStrokeWidth(3)
+        ring.setCustomBackgroundColor("transparent", "transparent")
+        layout.addStretch(1)
+        layout.addWidget(ring)
+        layout.addStretch(1)
+        self.table.setIndexWidget(index, container)
+
+    def _sync_speed_widget(self, row: int, node_id: str) -> None:
+        index = self._table_model.index(row, 7)
+        if not index.isValid():
+            return
+
+        percent = self._active_speed_progress.get(node_id)
+        existing = self.table.indexWidget(index)
+        if percent is None:
+            if existing is not None:
+                self.table.setIndexWidget(index, None)
+                existing.deleteLater()
+            return
+
+        if existing is None:
+            container = QWidget(self.table)
+            layout = QHBoxLayout(container)
+            layout.setContentsMargins(6, 0, 6, 0)
+            layout.setSpacing(0)
+            bar = ProgressBar(container)
+            bar.setRange(0, 100)
+            bar.setValue(percent)
+            bar.setTextVisible(False)
+            bar.setFixedHeight(6)
+            layout.addWidget(bar, 1)
+            container.setProperty("progressBar", bar)
+            self.table.setIndexWidget(index, container)
+            return
+
+        bar = existing.property("progressBar")
+        if isinstance(bar, ProgressBar):
+            bar.setValue(percent)
 
     @staticmethod
     def _sort_nodes(nodes: list[Node], key: str, ascending: bool) -> list[Node]:
@@ -483,7 +550,7 @@ class NodesPage(QWidget):
         return ids
 
     def _select_node(self, node_id: str) -> None:
-        row = self._id_to_row.get(node_id)
+        row = self._table_model.row_for_node(node_id)
         if row is not None:
             self.table.selectRow(row)
 
@@ -566,15 +633,15 @@ class NodesPage(QWidget):
         row = index.row()
         if 0 <= row < len(self._visible_node_ids):
             node_id = self._visible_node_ids[row]
-            node = next((n for n in self._nodes if n.id == node_id), None)
+            node = self._id_to_node.get(node_id)
             if node:
                 self._show_detail(node)
 
     def _on_context_menu(self, pos) -> None:
-        item = self.table.itemAt(pos)
-        if item is None:
+        index = self.table.indexAt(pos)
+        if not index.isValid():
             return
-        clicked_row = item.row()
+        clicked_row = index.row()
         if clicked_row < 0 or clicked_row >= len(self._visible_node_ids):
             return
 
@@ -649,21 +716,19 @@ class NodesPage(QWidget):
     # ── Utilities ──
 
     def _copy_node_link(self, node_id: str) -> None:
-        for node in self._nodes:
-            if node.id == node_id and node.link:
-                clipboard = QApplication.clipboard()
-                if clipboard is not None:
-                    clipboard.setText(node.link)
-                break
+        node = self._id_to_node.get(node_id)
+        if node and node.link:
+            clipboard = QApplication.clipboard()
+            if clipboard is not None:
+                clipboard.setText(node.link)
 
     def _copy_multiple_links(self, node_ids: set[str]) -> None:
         links: list[str] = []
         for vid in self._visible_node_ids:
             if vid in node_ids:
-                for node in self._nodes:
-                    if node.id == vid and node.link:
-                        links.append(node.link)
-                        break
+                node = self._id_to_node.get(vid)
+                if node and node.link:
+                    links.append(node.link)
         if links:
             clipboard = QApplication.clipboard()
             if clipboard is not None:
@@ -682,36 +747,3 @@ class NodesPage(QWidget):
                     self._copy_multiple_links(ids)
             return
         super().keyPressEvent(event)
-
-    @staticmethod
-    def _make_status_item(node: Node) -> QTableWidgetItem:
-        if node.is_alive is None:
-            item = QTableWidgetItem("--")
-        elif node.ping_ms is not None and node.speed_mbps is None and node.is_alive:
-            if node.speed_history:
-                # Тест скорости запускался и провалился
-                item = QTableWidgetItem("!")
-                item.setToolTip("Пинг есть, скорость нет — вероятно заблокирован провайдером")
-                item.setForeground(_ORANGE_BRUSH)
-            else:
-                # Тест скорости не запускался — нейтральный статус
-                item = QTableWidgetItem("--")
-        elif node.is_alive:
-            item = QTableWidgetItem("OK")
-            item.setToolTip("Сервер работает")
-            item.setForeground(_GREEN_BRUSH)
-        else:
-            item = QTableWidgetItem("X")
-            item.setToolTip("Сервер недоступен")
-            item.setForeground(_RED_BRUSH)
-        return item
-
-    @staticmethod
-    def _format_time(value: str | None) -> str:
-        if not value:
-            return ""
-        try:
-            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            return dt.strftime("%Y-%m-%d %H:%M")
-        except ValueError:
-            return value

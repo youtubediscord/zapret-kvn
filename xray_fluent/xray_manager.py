@@ -15,7 +15,15 @@ from PyQt6.QtCore import QObject, QProcess, pyqtSignal
 
 from .constants import RUNTIME_DIR, XRAY_CONFIG_FILE, XRAY_PATH_DEFAULT
 from .path_utils import resolve_configured_path
-from .subprocess_utils import decode_output, result_output_text, run_text
+from .subprocess_utils import (
+    decode_output,
+    pump_qt_events,
+    result_output_text,
+    run_text,
+    sleep_with_events,
+    wait_for_qprocess_finished,
+    wait_for_qprocess_started,
+)
 
 
 class XrayManager(QObject):
@@ -94,7 +102,7 @@ class XrayManager(QObject):
         self._process.setArguments(["run", "-c", str(XRAY_CONFIG_FILE)])
         self._process.start()
 
-        if not self._process.waitForStarted(2000):
+        if not wait_for_qprocess_started(self._process, 2000):
             self._starting = False
             self._report_startup_failure(f"Не удалось запустить Xray: {self._process.errorString()}")
             return False
@@ -116,16 +124,11 @@ class XrayManager(QObject):
 
         self._stop_requested = expected
         self._process.terminate()
-        from PyQt6.QtWidgets import QApplication
-        for _ in range(6):
-            if self._process.waitForFinished(100):
-                return True
-            app = QApplication.instance()
-            if app:
-                app.processEvents()
+        if wait_for_qprocess_finished(self._process, 600):
+            return True
 
         self._process.kill()
-        if self._process.waitForFinished(200):
+        if wait_for_qprocess_finished(self._process, 200):
             return True
 
         if self._process.state() == QProcess.ProcessState.NotRunning:
@@ -210,7 +213,7 @@ class XrayManager(QObject):
                 continue
             pid, name = owner
             if pid > 0 and (name or "").strip().lower() == "xray.exe" and self._kill_pid(pid):
-                time.sleep(0.5)
+                sleep_with_events(0.5)
                 if self._find_listening_port_owner(port) is None:
                     self.log_received.emit(f"[xray] terminated stale xray.exe PID {pid} on port {port}")
                     continue
@@ -311,17 +314,14 @@ class XrayManager(QObject):
         if not port_roles:
             return True
         deadline = time.monotonic() + timeout_sec
-        from PyQt6.QtWidgets import QApplication
         while time.monotonic() < deadline:
-            app = QApplication.instance()
-            if app:
-                app.processEvents()
+            pump_qt_events()
             if self._process.state() == QProcess.ProcessState.NotRunning:
                 self._report_startup_failure(self._unexpected_exit_message(self._last_exit_code, self._last_exit_status, startup=True))
                 return False
             if all(self._is_port_ready(port) for port in port_roles):
                 return True
-            time.sleep(0.1)
+            sleep_with_events(0.1)
         not_ready = [f"{role} {port}" if role else str(port) for port, role in port_roles.items() if not self._is_port_ready(port)]
         self.stop(expected=True)
         details = ", ".join(not_ready) if not_ready else "нужные порты"

@@ -3,7 +3,9 @@ from __future__ import annotations
 import locale
 import os
 import subprocess
+import time
 from pathlib import Path
+from typing import Any
 
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -43,6 +45,60 @@ def run_text(
     if creationflags is not None:
         kwargs["creationflags"] = creationflags
     return subprocess.run(command, **kwargs)
+
+
+def pump_qt_events() -> None:
+    try:
+        from PyQt6.QtWidgets import QApplication
+    except Exception:
+        return
+
+    app = QApplication.instance()
+    if app is not None:
+        app.processEvents()
+
+
+def sleep_with_events(duration_sec: float, *, step_sec: float = 0.05) -> None:
+    deadline = time.monotonic() + max(0.0, duration_sec)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        pump_qt_events()
+        time.sleep(min(step_sec, remaining))
+
+
+def _wait_for_qprocess_call(
+    process: Any,
+    method_name: str,
+    timeout_ms: int,
+    *,
+    slice_ms: int = 50,
+) -> bool:
+    remaining = max(0, int(timeout_ms))
+    waiter = getattr(process, method_name)
+
+    while remaining > 0:
+        step = min(slice_ms, remaining)
+        if waiter(step):
+            return True
+        pump_qt_events()
+        remaining -= step
+
+    pump_qt_events()
+    return False
+
+
+def wait_for_qprocess_started(process: Any, timeout_ms: int) -> bool:
+    return _wait_for_qprocess_call(process, "waitForStarted", timeout_ms)
+
+
+def wait_for_qprocess_finished(process: Any, timeout_ms: int) -> bool:
+    return _wait_for_qprocess_call(process, "waitForFinished", timeout_ms)
+
+
+def wait_for_qprocess_ready_read(process: Any, timeout_ms: int) -> bool:
+    return _wait_for_qprocess_call(process, "waitForReadyRead", timeout_ms)
 
 
 def is_same_path(left: str | Path | None, right: str | Path | None) -> bool:

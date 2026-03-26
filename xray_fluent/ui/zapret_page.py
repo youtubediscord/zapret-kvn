@@ -182,9 +182,8 @@ class ZapretPage(QWidget):
         self._reload_table()
 
     def set_error(self, message: str) -> None:
-        self.status_label.setText(f"Ошибка: {message}")
-        self.status_label.setStyleSheet("color: #F44336;")
         self.set_running(False)
+        self.status_label.setText(f"Ошибка: {message}")
         self.status_label.setStyleSheet("color: #F44336;")
 
     def current_preset(self) -> str:

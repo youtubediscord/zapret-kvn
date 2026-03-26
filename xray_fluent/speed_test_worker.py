@@ -57,6 +57,7 @@ class SpeedTestWorker(QThread):
 
     result = pyqtSignal(str, object, bool)   # node_id, speed_mbps (float|None), is_alive
     progress = pyqtSignal(int, int)          # current, total
+    node_progress = pyqtSignal(str, int)     # node_id, percent 0..100
     completed = pyqtSignal()
 
     def __init__(
@@ -85,7 +86,9 @@ class SpeedTestWorker(QThread):
             if self._cancelled:
                 break
             self.progress.emit(i + 1, total)
+            self.node_progress.emit(node.id, 0)
             speed, alive = self._test_node(node)
+            self.node_progress.emit(node.id, 100)
             self.result.emit(node.id, speed, alive)
         self.completed.emit()
 
@@ -150,6 +153,7 @@ class SpeedTestWorker(QThread):
             for _ in range(10):
                 if self._cancelled:
                     return None, False
+                self.node_progress.emit(node.id, 2 + _ * 2)
                 time.sleep(0.1)
 
             if proc.poll() is not None:
@@ -158,10 +162,10 @@ class SpeedTestWorker(QThread):
             url = _get_speed_url(node.country_code)
             rounds = max(1, SPEED_TEST_ROUNDS)
             results: list[float] = []
-            for _ in range(rounds):
+            for round_index in range(rounds):
                 if self._cancelled:
                     break
-                s = self._measure_speed(url)
+                s = self._measure_speed(url, node.id, round_index, rounds)
                 if s is not None and s > 0:
                     results.append(s)
 
@@ -190,7 +194,7 @@ class SpeedTestWorker(QThread):
                 except Exception:
                     pass
 
-    def _measure_speed(self, url: str) -> float | None:
+    def _measure_speed(self, url: str, node_id: str, round_index: int, total_rounds: int) -> float | None:
         """Скачивает тестовый файл через временный прокси, возвращает скорость в МБ/с."""
         proxy_url = f"http://{PROXY_HOST}:{SPEED_TEST_TEMP_HTTP_PORT}"
         handler = ProxyHandler({"http": proxy_url, "https": proxy_url})
@@ -201,7 +205,14 @@ class SpeedTestWorker(QThread):
         try:
             start = time.perf_counter()
             total_bytes = 0
+            percent_start = 20 + int(70 * round_index / max(total_rounds, 1))
+            percent_end = 20 + int(70 * (round_index + 1) / max(total_rounds, 1))
             with opener.open(req, timeout=self._timeout) as resp:
+                length_header = resp.headers.get("Content-Length") or ""
+                try:
+                    total_length = int(length_header)
+                except (TypeError, ValueError):
+                    total_length = 0
                 while True:
                     chunk = resp.read(64 * 1024)
                     if not chunk:
@@ -209,6 +220,15 @@ class SpeedTestWorker(QThread):
                     total_bytes += len(chunk)
                     if self._cancelled:
                         return None
+
+                    if total_length > 0:
+                        fraction = min(1.0, total_bytes / total_length)
+                    else:
+                        fraction = min(1.0, (time.perf_counter() - start) / max(self._timeout, 0.1))
+
+                    percent = percent_start + int((percent_end - percent_start) * fraction)
+                    self.node_progress.emit(node_id, max(percent_start, min(percent_end, percent)))
+
                     if time.perf_counter() - start > self._timeout:
                         break
 
@@ -216,6 +236,7 @@ class SpeedTestWorker(QThread):
             if elapsed <= 0 or total_bytes <= 0:
                 return None
 
+            self.node_progress.emit(node_id, percent_end)
             speed_mbps = (total_bytes / (1024 * 1024)) / elapsed
             return round(speed_mbps, 2)
 

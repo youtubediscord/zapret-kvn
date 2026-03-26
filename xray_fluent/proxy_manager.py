@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import sys
 
 if sys.platform == "win32":
     import winreg
 
-from .constants import PROXY_HOST
+from .constants import PROXY_HOST, RUNTIME_DIR
 
 
 INTERNET_OPTION_REFRESH = 37
@@ -17,6 +18,7 @@ INTERNET_SETTINGS_KEY = r"Software\Microsoft\Windows\CurrentVersion\Internet Set
 class ProxyManager:
     def __init__(self) -> None:
         self._backup: dict[str, str | int] | None = None
+        self._backup_file = RUNTIME_DIR / "system_proxy_backup.json"
 
     @property
     def is_supported(self) -> bool:
@@ -45,6 +47,31 @@ class ProxyManager:
             if "ProxyOverride" in values:
                 winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ, str(values["ProxyOverride"]))
 
+    def _load_persisted_backup(self) -> dict[str, str | int] | None:
+        if not self._backup_file.exists():
+            return None
+        try:
+            payload = json.loads(self._backup_file.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        result: dict[str, str | int] = {}
+        for key in ("ProxyEnable", "ProxyServer", "ProxyOverride"):
+            if key in payload:
+                result[key] = payload[key]
+        return result or None
+
+    def _persist_backup(self, values: dict[str, str | int] | None) -> None:
+        try:
+            if values:
+                self._backup_file.parent.mkdir(parents=True, exist_ok=True)
+                self._backup_file.write_text(json.dumps(values, ensure_ascii=True, indent=2), encoding="utf-8")
+            elif self._backup_file.exists():
+                self._backup_file.unlink()
+        except Exception:
+            pass
+
     def _refresh_system_proxy(self) -> None:
         if not self.is_supported:
             return
@@ -57,6 +84,7 @@ class ProxyManager:
             return
         if self._backup is None:
             self._backup = self._read_settings()
+            self._persist_backup(self._backup)
 
         proxy_server = (
             f"http={PROXY_HOST}:{http_port};"
@@ -83,13 +111,13 @@ class ProxyManager:
     def disable(self, restore_previous: bool = True) -> None:
         if not self.is_supported:
             return
-        if restore_previous and self._backup:
-            restored = dict(self._backup)
-            restored["ProxyEnable"] = 0
-            self._write_settings(restored)
+        backup = self._backup or self._load_persisted_backup()
+        if restore_previous and backup:
+            self._write_settings(dict(backup))
         else:
             self._write_settings({"ProxyEnable": 0})
         self._backup = None
+        self._persist_backup(None)
         self._refresh_system_proxy()
 
     def is_enabled(self) -> bool:

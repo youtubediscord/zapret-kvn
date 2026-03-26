@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ntpath
 import os
 import secrets
 import socket
@@ -49,6 +50,15 @@ def _find_free_port(start: int = SS_PROTECT_PORT_START, end: int = SS_PROTECT_PO
 def _generate_ss_password(length: int = 24) -> str:
     alphabet = string.ascii_letters + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+
+def _resolve_tun_final_outbound(routing: RoutingSettings) -> str:
+    """Map the selected routing mode to sing-box TUN final outbound."""
+    if routing.mode == ROUTING_GLOBAL:
+        return "proxy"
+    if routing.mode == ROUTING_DIRECT:
+        return "direct"
+    return "direct" if routing.tun_default_outbound == "direct" else "proxy"
 
 
 @dataclass
@@ -189,11 +199,7 @@ def _build_hybrid_singbox_config(
     # Process rules
     _append_process_rules(route_rules, routing)
 
-    # Default outbound for TUN
-    if routing.tun_default_outbound == "direct":
-        final_outbound = "direct"
-    else:
-        final_outbound = "proxy"
+    final_outbound = _resolve_tun_final_outbound(routing)
 
     return {
         "log": {"level": "warn", "timestamp": True},
@@ -339,7 +345,7 @@ def _build_native_config(
 
     route_rules = _build_route_rules(routing, node, settings)
 
-    final_outbound = "direct" if routing.tun_default_outbound == "direct" else "proxy"
+    final_outbound = _resolve_tun_final_outbound(routing)
 
     singbox_cfg: dict[str, Any] = {
         "log": {"level": "warn", "timestamp": True},
@@ -547,33 +553,78 @@ def _build_route_rules(routing: RoutingSettings, node: Node, settings: AppSettin
 
 
 def _append_process_rules(rules: list[dict[str, Any]], routing: RoutingSettings) -> None:
-    """Group manual process rules + process presets by action and append."""
-    proc_by_action: dict[str, list[str]] = {}
+    """Append preset/manual process rules with support for path and path-regex matches."""
+    preset_names_by_action: dict[str, list[str]] = {}
+    manual_names_by_action: dict[str, list[str]] = {}
+    manual_paths_by_action: dict[str, list[str]] = {}
+    manual_path_regex_by_action: dict[str, list[str]] = {}
 
     # Process presets (quick-add groups)
     for preset_id, action in routing.process_preset_routes.items():
         preset = PROCESS_PRESETS_BY_ID.get(preset_id)
         if preset and action in ("direct", "proxy", "block"):
             for exe in preset.processes:
-                proc_by_action.setdefault(action, []).append(exe)
+                preset_names_by_action.setdefault(action, []).append(exe)
 
-    # Manual process rules (user-added exe files)
+    # Manual process rules
     for pr in routing.process_rules:
-        name = pr.get("process", "").strip()
         action = pr.get("action", "proxy")
-        if name and action in ("direct", "proxy", "block"):
-            proc_by_action.setdefault(action, []).append(name)
+        if action not in ("direct", "proxy", "block"):
+            continue
+        match, value = _resolve_process_rule_match(pr)
+        if not value:
+            continue
+        if match == "path":
+            manual_paths_by_action.setdefault(action, []).append(value)
+        elif match == "path_regex":
+            manual_path_regex_by_action.setdefault(action, []).append(value)
+        else:
+            manual_names_by_action.setdefault(action, []).append(value)
 
-    for action, names in proc_by_action.items():
-        # Deduplicate (case-insensitive)
-        seen: set[str] = set()
-        unique: list[str] = []
-        for n in names:
-            low = n.lower()
-            if low not in seen:
-                seen.add(low)
-                unique.append(n)
-        rules.append({"process_name": unique, "outbound": action})
+    _append_grouped_process_rule(rules, "process_path", manual_paths_by_action, case_insensitive=True)
+    _append_grouped_process_rule(rules, "process_path_regex", manual_path_regex_by_action, case_insensitive=False)
+    _append_grouped_process_rule(rules, "process_name", manual_names_by_action, case_insensitive=True)
+    _append_grouped_process_rule(rules, "process_name", preset_names_by_action, case_insensitive=True)
+
+
+def _resolve_process_rule_match(pr: dict[str, str]) -> tuple[str, str]:
+    value = str(pr.get("process", "")).strip()
+    if not value:
+        return "name", ""
+    match = str(pr.get("match", "")).strip().lower()
+    if match == "path_regex":
+        return match, value
+    if match == "path":
+        return match, value.replace("/", "\\")
+    if value.lower().startswith("regex:"):
+        return "path_regex", value[len("regex:"):].strip()
+    if "\\" in value or "/" in value or (len(value) > 1 and value[1] == ":"):
+        return "path", value.replace("/", "\\")
+    return "name", ntpath.basename(value)
+
+
+def _append_grouped_process_rule(
+    rules: list[dict[str, Any]],
+    field_name: str,
+    values_by_action: dict[str, list[str]],
+    *,
+    case_insensitive: bool,
+) -> None:
+    for action, values in values_by_action.items():
+        unique = _dedupe_process_values(values, case_insensitive=case_insensitive)
+        if unique:
+            rules.append({field_name: unique, "outbound": action})
+
+
+def _dedupe_process_values(values: list[str], *, case_insensitive: bool) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for value in values:
+        key = value.lower() if case_insensitive else value
+        if key not in seen:
+            seen.add(key)
+            unique.append(value)
+    return unique
 
 
 def _append_singbox_rules(

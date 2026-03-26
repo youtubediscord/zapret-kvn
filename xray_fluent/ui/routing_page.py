@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ntpath
 import os
+import re
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
@@ -46,6 +48,13 @@ _SERVICE_ACTIONS = [
     ("Прямой", "direct"),
     ("Блокировка", "block"),
 ]
+
+_PROCESS_MATCH_NAME = "name"
+_PROCESS_MATCH_PATH = "path"
+_PROCESS_MATCH_PATH_REGEX = "path_regex"
+_PROCESS_MATCH_ROLE = int(Qt.ItemDataRole.UserRole)
+_PROCESS_VALUE_ROLE = _PROCESS_MATCH_ROLE + 1
+_PROCESS_LABEL_ROLE = _PROCESS_MATCH_ROLE + 2
 
 
 class _ServiceRouteCard(SettingCard):
@@ -239,7 +248,9 @@ class RoutingPage(QWidget):
         root.addWidget(SubtitleLabel("Маршрутизация по процессам", container))
 
         self.process_info = CaptionLabel(
-            "В режиме TUN перехватывает весь трафик процесса. В системном прокси — только если приложение использует прокси.", container
+            "В режиме TUN перехватывает весь трафик процесса. Для приложений с helper/update.exe лучше добавлять папку приложения. "
+            "В системном прокси правила работают только если приложение использует прокси.",
+            container,
         )
         root.addWidget(self.process_info)
 
@@ -292,8 +303,12 @@ class RoutingPage(QWidget):
 
         proc_toolbar = QHBoxLayout()
         self.add_proc_btn = PrimaryToolButton(FIF.FOLDER_ADD, container)
-        self.add_proc_btn.setToolTip("Добавить .exe")
+        self.add_proc_btn.setToolTip("Добавить точный .exe")
         proc_toolbar.addWidget(self.add_proc_btn)
+
+        self.add_proc_folder_btn = TransparentToolButton(FIF.FOLDER, container)
+        self.add_proc_folder_btn.setToolTip("Добавить папку приложения")
+        proc_toolbar.addWidget(self.add_proc_folder_btn)
 
         self.del_proc_btn = TransparentToolButton(FIF.DELETE, container)
         self.del_proc_btn.setToolTip("Удалить выбранные")
@@ -304,7 +319,7 @@ class RoutingPage(QWidget):
 
         self.proc_table = TableWidget(self._process_container)
         self.proc_table.setColumnCount(2)
-        self.proc_table.setHorizontalHeaderLabels(["Процесс", "Действие"])
+        self.proc_table.setHorizontalHeaderLabels(["Приложение / папка", "Действие"])
         self.proc_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.proc_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.proc_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -316,7 +331,8 @@ class RoutingPage(QWidget):
         root.addWidget(self._process_container)
 
         self.proxy_warning = CaptionLabel(
-            "В системном прокси: правила действуют только для приложений, использующих прокси", container
+            "В системном прокси полный матч по пути/папке недоступен: точный эффект есть только в TUN (sing-box).",
+            container,
         )
         self.proxy_warning.setStyleSheet("color: #e6a700;")
         self.proxy_warning.setVisible(False)
@@ -338,6 +354,7 @@ class RoutingPage(QWidget):
         self.import_btn.clicked.connect(self._on_import_rules)
         self.export_btn.clicked.connect(self._export_rules)
         self.add_proc_btn.clicked.connect(self._on_browse_exe)
+        self.add_proc_folder_btn.clicked.connect(self._on_browse_process_folder)
         self.del_proc_btn.clicked.connect(self._on_del_procs)
         self.rules_table.cellChanged.connect(self._schedule_apply)
 
@@ -406,22 +423,25 @@ class RoutingPage(QWidget):
         self.proc_table.setUpdatesEnabled(False)
         self.proc_table.setRowCount(0)
         for pr in routing.process_rules:
-            name = pr.get("process", "")
+            value = pr.get("process", "")
             action = pr.get("action", "proxy")
-            if name:
-                self._add_process_row(name, action)
+            match = self._normalize_process_match(pr.get("match", ""), value)
+            label = pr.get("label", "")
+            if value:
+                self._add_process_row(value, action, match=match, label=label)
         self.proc_table.setUpdatesEnabled(True)
 
         self._loading = False
 
         # First launch: save defaults immediately
-        if use_defaults:
+        if use_defaults or use_proc_defaults:
             self._emit_apply()
 
     def set_tun_mode(self, enabled: bool) -> None:
         # Process routing works in both modes — show warning only in system proxy mode
         self._process_container.setEnabled(True)
         self.add_proc_btn.setEnabled(True)
+        self.add_proc_folder_btn.setEnabled(True)
         self.del_proc_btn.setEnabled(True)
         self.proxy_warning.setVisible(not enabled)
         # TUN default outbound + process presets + DNS settings only relevant in TUN mode
@@ -504,13 +524,67 @@ class RoutingPage(QWidget):
 
     # --- Process table helpers ---
 
-    def _add_process_row(self, name: str = "", action: str = "proxy") -> None:
+    @staticmethod
+    def _normalize_process_match(match: str, value: str) -> str:
+        normalized = str(match or "").strip().lower()
+        if normalized in {_PROCESS_MATCH_NAME, _PROCESS_MATCH_PATH, _PROCESS_MATCH_PATH_REGEX}:
+            return normalized
+        lowered = str(value or "").strip().lower()
+        if lowered.startswith("regex:"):
+            return _PROCESS_MATCH_PATH_REGEX
+        if "\\\\" in value or "\\" in value or "/" in value or (len(value) > 1 and value[1] == ":"):
+            return _PROCESS_MATCH_PATH
+        return _PROCESS_MATCH_NAME
+
+    @staticmethod
+    def _normalize_windows_path(path: str) -> str:
+        normalized = os.path.normpath(path.strip())
+        return normalized.replace("/", "\\")
+
+    @classmethod
+    def _format_process_label(cls, match: str, value: str, label: str = "") -> str:
+        if label:
+            return label
+        if match == _PROCESS_MATCH_PATH_REGEX:
+            return f"Папка: {value}"
+        return value
+
+    @staticmethod
+    def _build_folder_process_regex(folder_path: str) -> tuple[str, str]:
+        folder = RoutingPage._normalize_windows_path(folder_path).rstrip("\\")
+        escaped = re.escape(folder)
+        regex = rf"(?i)^{escaped}\\.*\.exe$"
+        label = f"Папка: {folder}\\*.exe"
+        return regex, label
+
+    def _find_process_rule_row(self, match: str, value: str) -> int:
+        for row in range(self.proc_table.rowCount()):
+            item = self.proc_table.item(row, 0)
+            if not item:
+                continue
+            existing_match = str(item.data(_PROCESS_MATCH_ROLE) or _PROCESS_MATCH_NAME)
+            existing_value = str(item.data(_PROCESS_VALUE_ROLE) or item.text())
+            if existing_match == match and existing_value.lower() == value.lower():
+                return row
+        return -1
+
+    def _add_process_row(
+        self,
+        value: str = "",
+        action: str = "proxy",
+        *,
+        match: str = _PROCESS_MATCH_NAME,
+        label: str = "",
+    ) -> None:
         row = self.proc_table.rowCount()
         self.proc_table.insertRow(row)
 
-        name_item = QTableWidgetItem(name)
-        name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-        self.proc_table.setItem(row, 0, name_item)
+        process_item = QTableWidgetItem(self._format_process_label(match, value, label))
+        process_item.setFlags(process_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        process_item.setData(_PROCESS_MATCH_ROLE, match)
+        process_item.setData(_PROCESS_VALUE_ROLE, value)
+        process_item.setData(_PROCESS_LABEL_ROLE, label)
+        self.proc_table.setItem(row, 0, process_item)
 
         combo = ComboBox()
         for label, data in _ACTIONS:
@@ -527,7 +601,8 @@ class RoutingPage(QWidget):
         )
         if not path:
             return
-        name = os.path.basename(path)
+        normalized_path = self._normalize_windows_path(path)
+        name = ntpath.basename(normalized_path)
         if name.lower() in self._PROTECTED_PROCESSES:
             from qfluentwidgets import InfoBar, InfoBarPosition
             InfoBar.warning(
@@ -538,11 +613,19 @@ class RoutingPage(QWidget):
                 position=InfoBarPosition.TOP,
             )
             return
-        for row in range(self.proc_table.rowCount()):
-            item = self.proc_table.item(row, 0)
-            if item and item.text().lower() == name.lower():
-                return
-        self._add_process_row(name, "proxy")
+        if self._find_process_rule_row(_PROCESS_MATCH_PATH, normalized_path) >= 0:
+            return
+        self._add_process_row(normalized_path, "proxy", match=_PROCESS_MATCH_PATH)
+        self._schedule_apply()
+
+    def _on_browse_process_folder(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "Выбрать папку приложения")
+        if not folder:
+            return
+        regex, label = self._build_folder_process_regex(folder)
+        if self._find_process_rule_row(_PROCESS_MATCH_PATH_REGEX, regex) >= 0:
+            return
+        self._add_process_row(regex, "proxy", match=_PROCESS_MATCH_PATH_REGEX, label=label)
         self._schedule_apply()
 
     def _on_del_procs(self) -> None:
@@ -588,11 +671,18 @@ class RoutingPage(QWidget):
             combo = self.proc_table.cellWidget(row, 1)
             if not item or not combo:
                 continue
-            name = item.text().strip()
-            if not name:
+            value = str(item.data(_PROCESS_VALUE_ROLE) or item.text()).strip()
+            if not value:
                 continue
+            match = str(item.data(_PROCESS_MATCH_ROLE) or self._normalize_process_match("", value))
+            label = str(item.data(_PROCESS_LABEL_ROLE) or "").strip()
             action = combo.currentData() or "proxy"
-            process_rules.append({"process": name, "action": action})
+            entry = {"process": value, "action": action}
+            if match != _PROCESS_MATCH_NAME:
+                entry["match"] = match
+            if label:
+                entry["label"] = label
+            process_rules.append(entry)
 
         # Collect service states
         service_routes: dict[str, str] = {}

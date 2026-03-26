@@ -7,6 +7,7 @@ from qfluentwidgets import (
     FluentIcon as FIF,
     FluentWindow,
     InfoBar,
+    InfoBarIcon,
     InfoBarPosition,
     NavigationItemPosition,
     Theme,
@@ -40,7 +41,12 @@ class MainWindow(FluentWindow):
         self._quitting = False
         self._tray_notified = False
         self._initialized = False
+        self._bulk_task_tip: InfoBar | None = None
+        self._bulk_task_type: str | None = None
         self._tray_available = QSystemTrayIcon.isSystemTrayAvailable()
+        self._deferred_dashboard_metrics: tuple[float, float, int | None] | None = None
+        self._deferred_process_stats: list | None = None
+        self._has_deferred_process_stats = False
         self.tray: QSystemTrayIcon | None = None
         self.tray_show_action: QAction | None = None
         self.tray_connect_action: QAction | None = None
@@ -224,12 +230,16 @@ class MainWindow(FluentWindow):
         self.controller.settings_changed.connect(self._on_settings_changed)
         self.controller.log_line.connect(self.logs_page.append_line)
         self.controller.status.connect(self._show_status)
+        self.controller.bulk_task_progress.connect(self._on_bulk_task_progress)
         self.controller.ping_updated.connect(self._on_ping_updated)
+        self.controller.speed_progress_updated.connect(self._on_speed_progress_updated)
         self.controller.connectivity_test_done.connect(self._on_connectivity_test_done)
         self.controller.live_metrics_updated.connect(self._on_live_metrics_updated)
         self.controller.xray_update_result.connect(self._on_xray_update_result)
         self.controller.lock_state_changed.connect(self._on_lock_state_changed)
         self.controller.auto_switch_triggered.connect(self._on_auto_switch)
+        self.controller.transition_state_changed.connect(self._on_transition_state_changed)
+        self.stackedWidget.currentChanged.connect(self._on_current_interface_changed)
 
     def _init_window(self) -> None:
         s = self.controller.state.settings
@@ -264,9 +274,18 @@ class MainWindow(FluentWindow):
 
     def _on_connection_changed(self, connected: bool) -> None:
         self.dashboard_page.set_connection(connected)
+        if not connected:
+            self._deferred_dashboard_metrics = None
+            self._deferred_process_stats = None
+            self._has_deferred_process_stats = False
         if self.tray_connect_action is not None:
             self.tray_connect_action.setText("Отключить" if connected else "Подключить")
         self._refresh_tray_tooltip()
+
+    def _on_transition_state_changed(self, busy: bool, _message: str) -> None:
+        self.dashboard_page.set_transition_busy(busy)
+        if self.tray_connect_action is not None:
+            self.tray_connect_action.setEnabled(not busy)
 
     def _on_routing_changed(self, routing: RoutingSettings) -> None:
         self.routing_page.set_routing(routing)
@@ -297,11 +316,32 @@ class MainWindow(FluentWindow):
         up_bps = float(payload.get("up_bps") or 0.0)
         latency = payload.get("latency_ms")
         latency_ms = int(latency) if isinstance(latency, int) else None
-        self.dashboard_page.set_live_metrics(down_bps, up_bps, latency_ms)
-        # Process traffic stats (TUN mode with sing-box Clash API)
         process_stats = payload.get("process_stats")
+        if not self._is_dashboard_active():
+            self._deferred_dashboard_metrics = (down_bps, up_bps, latency_ms)
+            if process_stats is not None:
+                self._deferred_process_stats = list(process_stats)
+                self._has_deferred_process_stats = True
+            return
+
+        self.dashboard_page.set_live_metrics(down_bps, up_bps, latency_ms)
         if process_stats is not None:
             self.dashboard_page.set_process_stats(process_stats)
+
+    def _is_dashboard_active(self) -> bool:
+        return self.stackedWidget.currentWidget() is self.dashboard_page
+
+    def _on_current_interface_changed(self, _index: int) -> None:
+        if not self._is_dashboard_active():
+            return
+        if self._deferred_dashboard_metrics is not None:
+            down_bps, up_bps, latency_ms = self._deferred_dashboard_metrics
+            self.dashboard_page.set_live_metrics(down_bps, up_bps, latency_ms)
+            self._deferred_dashboard_metrics = None
+        if self._has_deferred_process_stats:
+            self.dashboard_page.set_process_stats(self._deferred_process_stats or [])
+            self._deferred_process_stats = None
+            self._has_deferred_process_stats = False
 
     def _on_xray_update_result(self, result: XrayCoreUpdateResult) -> None:
         self.logs_page.append_line(f"[core-update] {result.status}: {result.message}")
@@ -335,6 +375,66 @@ class MainWindow(FluentWindow):
             parent=self,
         )
 
+    def _on_bulk_task_progress(self, task: str, current: int, total: int, completed: bool) -> None:
+        task = task.strip().lower()
+        if task not in {"ping", "speed"}:
+            return
+
+        total = max(1, total)
+        current = max(0, min(current, total))
+        title = "Пинг серверов" if task == "ping" else "Тест скорости"
+
+        if completed:
+            if task == "ping":
+                self.nodes_page.finish_ping_activity()
+            else:
+                self.nodes_page.finish_speed_activity()
+            if self._bulk_task_tip and self._bulk_task_type == task:
+                self._set_bulk_task_tip_content(f"Завершено {current}/{total}")
+                QTimer.singleShot(1000, self._clear_bulk_task_tip)
+            return
+
+        content = f"{current}/{total}"
+
+        if self._bulk_task_tip is None or self._bulk_task_type != task:
+            self._clear_bulk_task_tip()
+            tip = InfoBar(
+                icon=InfoBarIcon.INFORMATION,
+                title=title,
+                content=content,
+                isClosable=True,
+                duration=-1,
+                position=InfoBarPosition.TOP_RIGHT,
+                parent=self,
+            )
+            tip.setMinimumWidth(220)
+            tip.closedSignal.connect(self._on_bulk_task_tip_closed)
+            tip.show()
+            self._bulk_task_tip = tip
+            self._bulk_task_type = task
+            return
+
+        self._set_bulk_task_tip_content(content)
+
+    def _on_bulk_task_tip_closed(self) -> None:
+        self._bulk_task_tip = None
+        self._bulk_task_type = None
+
+    def _set_bulk_task_tip_content(self, content: str) -> None:
+        if self._bulk_task_tip is None:
+            return
+        self._bulk_task_tip.content = content
+        self._bulk_task_tip.contentLabel.setText(content)
+        self._bulk_task_tip.adjustSize()
+
+    def _clear_bulk_task_tip(self) -> None:
+        if self._bulk_task_tip is None:
+            return
+        tip = self._bulk_task_tip
+        self._bulk_task_tip = None
+        self._bulk_task_type = None
+        tip.close()
+
     def _show_status(self, level: str, message: str) -> None:
         level = level.lower().strip()
         if level == "error":
@@ -363,16 +463,21 @@ class MainWindow(FluentWindow):
             self._show_status("warning", "Новых серверов не импортировано")
 
     def _ping_requested(self, ids: set[str]) -> None:
+        self.nodes_page.start_ping_activity(ids or None)
         if ids:
             self.controller.ping_nodes(ids)
         else:
             self.controller.ping_nodes(None)
 
     def _speed_test_requested(self, ids: set[str]) -> None:
+        self.nodes_page.start_speed_activity()
         if ids:
             self.controller.speed_test_nodes(ids)
         else:
             self.controller.speed_test_nodes(None)
+
+    def _on_speed_progress_updated(self, node_id: str, percent: int) -> None:
+        self.nodes_page.update_speed_progress(node_id, percent)
 
     def _on_speed_updated(self, node_id: str, speed_mbps: float | None, is_alive: bool) -> None:
         self.nodes_page.update_speed(node_id, speed_mbps)

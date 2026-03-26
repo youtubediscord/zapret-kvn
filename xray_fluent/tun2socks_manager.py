@@ -11,7 +11,16 @@ _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 from PyQt6.QtCore import QObject, QProcess, pyqtSignal
 
 from .constants import BASE_DIR
-from .subprocess_utils import decode_output, kill_processes_by_path, result_output_text, run_text
+from .subprocess_utils import (
+    decode_output,
+    kill_processes_by_path,
+    result_output_text,
+    run_text,
+    sleep_with_events,
+    wait_for_qprocess_finished,
+    wait_for_qprocess_ready_read,
+    wait_for_qprocess_started,
+)
 
 TUN2SOCKS_PATH_DEFAULT = BASE_DIR / "core" / "tun2socks.exe"
 TUN_DEVICE_NAME = "ZapretKVN_TUN"
@@ -75,18 +84,17 @@ class Tun2SocksManager(QObject):
         ])
         self._process.start()
 
-        if not self._process.waitForStarted(5000):
+        if not wait_for_qprocess_started(self._process, 5000):
             self.error.emit(f"failed to start tun2socks: {self._process.errorString()}")
             return False
 
         # Wait for TUN adapter to be created
-        self._process.waitForReadyRead(3000)
+        wait_for_qprocess_ready_read(self._process, 3000)
         if self._process.state() == QProcess.ProcessState.NotRunning:
             self.error.emit("tun2socks exited right after start")
             return False
 
         # Wait until TUN interface appears (up to 10 seconds)
-        from PyQt6.QtWidgets import QApplication
         for _ in range(20):
             result = run_text(
                 ["netsh", "interface", "ipv4", "show", "interfaces"],
@@ -95,14 +103,10 @@ class Tun2SocksManager(QObject):
             )
             if TUN_DEVICE_NAME in result_output_text(result):
                 break
-            # Process Qt events so UI doesn't freeze
-            app = QApplication.instance()
-            if app:
-                app.processEvents()
-            time.sleep(0.5)
+            sleep_with_events(0.5)
         else:
             self._process.terminate()
-            self._process.waitForFinished(2000)
+            wait_for_qprocess_finished(self._process, 2000)
             self.error.emit("TUN adapter did not appear after tun2socks start")
             return False
 
@@ -122,12 +126,12 @@ class Tun2SocksManager(QObject):
 
         self._stop_requested = expected
         self._process.terminate()
-        if self._process.waitForFinished(2000):
+        if wait_for_qprocess_finished(self._process, 2000):
             self._cleanup_routes()
             return True
 
         self._process.kill()
-        if self._process.waitForFinished(1000):
+        if wait_for_qprocess_finished(self._process, 1000):
             self._cleanup_routes()
             return True
 
@@ -268,7 +272,7 @@ class Tun2SocksManager(QObject):
             return
         try:
             if kill_processes_by_path("tun2socks.exe", TUN2SOCKS_PATH_DEFAULT, timeout=5):
-                time.sleep(1)
+                sleep_with_events(1.0)
         except Exception:
             pass
 
