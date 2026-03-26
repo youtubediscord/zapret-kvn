@@ -25,6 +25,9 @@ class UpdatesPage(QWidget):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("updates")
+        self._neutral_status_style = "color: #888;"
+        self._success_status_style = "color: #4CAF50; font-weight: bold;"
+        self._error_status_style = "color: #E57373; font-weight: bold;"
 
         root = QVBoxLayout(self)
         root.setContentsMargins(36, 28, 36, 28)
@@ -44,7 +47,7 @@ class UpdatesPage(QWidget):
         app_box.addWidget(self._app_version_label)
 
         self._app_status = CaptionLabel("", self)
-        self._app_status.setStyleSheet("color: #888;")
+        self._app_status.setStyleSheet(self._neutral_status_style)
         app_box.addWidget(self._app_status)
 
         # Progress bar
@@ -88,7 +91,7 @@ class UpdatesPage(QWidget):
         xray_box.addWidget(self._xray_version_label)
 
         self._xray_status = CaptionLabel("", self)
-        self._xray_status.setStyleSheet("color: #888;")
+        self._xray_status.setStyleSheet(self._neutral_status_style)
         xray_box.addWidget(self._xray_status)
 
         xray_btn_row = QHBoxLayout()
@@ -114,9 +117,23 @@ class UpdatesPage(QWidget):
         self._xray_version_label.setText(f"Версия: {version}" if version else "Версия: не найдена")
 
     def set_app_status(self, text: str) -> None:
+        self._app_status.setStyleSheet(self._neutral_status_style)
         self._app_status.setText(text)
 
     def set_xray_status(self, text: str) -> None:
+        self._xray_status.setStyleSheet(self._neutral_status_style)
+        self._xray_status.setText(text)
+
+    def set_app_error(self, text: str) -> None:
+        self._app_status.setStyleSheet(self._error_status_style)
+        self._app_status.setText(text)
+
+    def set_xray_error(self, text: str) -> None:
+        self._xray_status.setStyleSheet(self._error_status_style)
+        self._xray_status.setText(text)
+
+    def set_xray_success(self, text: str) -> None:
+        self._xray_status.setStyleSheet(self._success_status_style)
         self._xray_status.setText(text)
 
     def show_checking(self) -> None:
@@ -124,12 +141,14 @@ class UpdatesPage(QWidget):
         self._app_spinner.show()
         self._app_spinner.start()
         self.check_app_btn.setEnabled(False)
+        self._app_status.setStyleSheet(self._neutral_status_style)
         self._app_status.setText("Проверка обновлений...")
 
     def show_download_progress(self, percent: int) -> None:
         self._app_spinner.hide()
         self._app_progress.show()
         self._app_progress.setValue(percent)
+        self._app_status.setStyleSheet(self._neutral_status_style)
         self._app_status.setText(f"Загрузка: {percent}%")
         self.check_app_btn.setEnabled(False)
         self.download_btn.setEnabled(False)
@@ -147,11 +166,11 @@ class UpdatesPage(QWidget):
         self._app_spinner.hide()
         self.check_app_btn.setEnabled(True)
         self._app_status.setText(f"Доступна новая версия: v{version}")
-        self._app_status.setStyleSheet("color: #4CAF50; font-weight: bold;")
+        self._app_status.setStyleSheet(self._success_status_style)
         self.download_btn.show()
         self.download_btn.setText(f"Скачать v{version} и установить")
 
     def show_up_to_date(self) -> None:
         self.show_idle()
         self._app_status.setText("У вас последняя версия")
-        self._app_status.setStyleSheet("color: #4CAF50;")
+        self._app_status.setStyleSheet(self._success_status_style)

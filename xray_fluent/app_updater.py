@@ -28,6 +28,26 @@ GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 USER_AGENT = f"ZapretKVN/{APP_VERSION}"
 
 
+def _powershell_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _write_utf8_bom_text(path: Path, text: str) -> None:
+    path.write_bytes(b"\xef\xbb\xbf" + text.encode("utf-8"))
+
+
+def _resolve_extracted_app_dir(root: Path, exe_name: str) -> Path:
+    if (root / exe_name).is_file():
+        return root
+    child_dirs = [path for path in root.iterdir() if path.is_dir()]
+    if len(child_dirs) == 1 and (child_dirs[0] / exe_name).is_file():
+        return child_dirs[0]
+    for path in child_dirs:
+        if (path / exe_name).is_file():
+            return path
+    return root
+
+
 @dataclass(slots=True)
 class AppUpdate:
     version: str
@@ -71,7 +91,6 @@ class UpdateChecker(QThread):
 
             if not asset:
                 self.error.emit(f"Релиз {tag} найден, но отсутствует Windows zip-архив")
-                self.result.emit(None)
                 return
 
             self.result.emit(AppUpdate(
@@ -83,7 +102,7 @@ class UpdateChecker(QThread):
             ))
         except Exception as exc:
             self.error.emit(str(exc))
-            self.result.emit(None)
+            return
 
 
 _log = logging.getLogger(__name__)
@@ -234,6 +253,7 @@ class UpdateDownloader(QThread):
     # ── main thread entry ───────────────────────────────────────
 
     def run(self) -> None:
+        tmp_dir: Path | None = None
         try:
             tmp_dir = Path(tempfile.mkdtemp(prefix="zapretkvn_update_"))
             zip_path = tmp_dir / "update.zip"
@@ -288,29 +308,52 @@ class UpdateDownloader(QThread):
             with zipfile.ZipFile(zip_path, "r") as zf:
                 zf.extractall(extract_dir)
 
-            # Write restart script
             exe_name = "ZapretKVN.exe"
+            source_dir = _resolve_extracted_app_dir(extract_dir, exe_name)
+            if not (source_dir / exe_name).is_file():
+                self.error.emit("Архив обновления не содержит ZapretKVN.exe")
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                return
+
+            # Write restart script
             current_pid = os.getpid()
-            app_dir = str(BASE_DIR)
-            src_dir = str(extract_dir)
-            script = tmp_dir / "_update.bat"
-            script.write_text(
-                "@echo off\r\n"
-                "chcp 65001 >nul\r\n"
-                "echo Updating zapret kvn...\r\n"
-                "timeout /t 2 /nobreak >nul\r\n"
-                f'taskkill /F /PID {current_pid} 2>nul\r\n'
-                "timeout /t 1 /nobreak >nul\r\n"
-                f'xcopy /E /Y /Q "{src_dir}\\*" "{app_dir}\\"\r\n'
-                "echo Update complete. Restarting...\r\n"
-                f'start "" "{app_dir}\\{exe_name}"\r\n'
-                f'rmdir /S /Q "{str(tmp_dir)}"\r\n',
-                encoding="utf-8-sig",
-            )
+            app_dir = BASE_DIR
+            script = tmp_dir / "_update.ps1"
+            script_text = "\r\n".join([
+                "$ErrorActionPreference = 'Stop'",
+                f"$pidToWait = {current_pid}",
+                f"$sourceDir = {_powershell_literal(str(source_dir))}",
+                f"$appDir = {_powershell_literal(str(app_dir))}",
+                f"$exePath = {_powershell_literal(str(app_dir / exe_name))}",
+                f"$tempDir = {_powershell_literal(str(tmp_dir))}",
+                "for ($i = 0; $i -lt 120; $i++) {",
+                "    if (-not (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue)) { break }",
+                "    Start-Sleep -Milliseconds 500",
+                "}",
+                "$proc = Get-Process -Id $pidToWait -ErrorAction SilentlyContinue",
+                "if ($proc) { Stop-Process -Id $pidToWait -Force }",
+                "Get-ChildItem -LiteralPath $sourceDir -Force | ForEach-Object {",
+                "    Copy-Item -LiteralPath $_.FullName -Destination $appDir -Recurse -Force",
+                "}",
+                "Start-Process -FilePath $exePath",
+                "Start-Sleep -Seconds 2",
+                "Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue",
+                "",
+            ])
+            _write_utf8_bom_text(script, script_text)
 
             # Launch script and exit
             subprocess.Popen(
-                ["cmd", "/c", str(script)],
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-WindowStyle",
+                    "Hidden",
+                    "-File",
+                    str(script),
+                ],
                 creationflags=0x08000000,
                 close_fds=True,
             )
@@ -318,4 +361,6 @@ class UpdateDownloader(QThread):
             self.finished_ok.emit()
 
         except Exception as exc:
+            if tmp_dir is not None:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
             self.error.emit(str(exc))

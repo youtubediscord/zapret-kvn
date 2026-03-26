@@ -203,8 +203,8 @@ class MainWindow(FluentWindow):
         self.settings_page.disable_password_requested.connect(self.controller.disable_master_password)
         self.settings_page.lock_now_requested.connect(self.controller.lock)
         self.updates_page.check_app_requested.connect(self._check_updates)
-        self.updates_page.check_xray_requested.connect(lambda: self.controller.run_xray_core_update(False, silent=False))
-        self.updates_page.update_xray_requested.connect(lambda: self.controller.run_xray_core_update(True, silent=False))
+        self.updates_page.check_xray_requested.connect(self._check_xray_updates)
+        self.updates_page.update_xray_requested.connect(self._update_xray_core)
         self.settings_page.export_backup_requested.connect(self._export_backup)
         self.settings_page.import_backup_requested.connect(self._import_backup)
         self.settings_page.set_encryption_requested.connect(self._set_encryption)
@@ -302,6 +302,15 @@ class MainWindow(FluentWindow):
 
     def _on_xray_update_result(self, result: XrayCoreUpdateResult) -> None:
         self.logs_page.append_line(f"[core-update] {result.status}: {result.message}")
+        if result.status == "error":
+            self.updates_page.set_xray_error(result.message)
+        elif result.status in {"updated", "up_to_date"}:
+            self.updates_page.set_xray_success(result.message)
+        else:
+            self.updates_page.set_xray_status(result.message)
+
+        if result.updated:
+            self.updates_page.set_xray_version(result.latest_version)
 
     def _on_connectivity_test_done(self, ok: bool, message: str, elapsed_ms: int | None) -> None:
         if ok and elapsed_ms is not None:
@@ -498,7 +507,7 @@ class MainWindow(FluentWindow):
         self._update_in_progress = False
         if not silent:
             self.updates_page.show_idle()
-            self.updates_page.set_app_status(f"Ошибка проверки: {err}")
+            self.updates_page.set_app_error(f"Ошибка проверки: {err}")
             self._show_status("error", f"Ошибка проверки обновлений: {err}")
 
     def _on_update_check_result(self, update: AppUpdate | None, silent: bool) -> None:
@@ -562,8 +571,16 @@ class MainWindow(FluentWindow):
     def _on_update_error(self, err: str) -> None:
         self._update_in_progress = False
         self.updates_page.show_idle()
-        self.updates_page.set_app_status(f"Ошибка: {err}")
+        self.updates_page.set_app_error(f"Ошибка: {err}")
         self._show_status("error", err)
+
+    def _check_xray_updates(self) -> None:
+        self.updates_page.set_xray_status("Проверка обновлений Xray...")
+        self.controller.run_xray_core_update(False, silent=False)
+
+    def _update_xray_core(self) -> None:
+        self.updates_page.set_xray_status("Обновление Xray...")
+        self.controller.run_xray_core_update(True, silent=False)
 
     def _apply_theme(self, theme_name: str, accent_color: str) -> None:
         normalized = theme_name.lower().strip()

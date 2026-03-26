@@ -121,18 +121,6 @@ jobs:
             Copy-Item -Recurse zapret dist/ZapretKVN/zapret
           }
 
-          # Debug launcher
-          $launcher = @"
-          @echo off
-          setlocal
-          set XRAY_FLUENT_SHOW_CONSOLE=1
-          echo Launching ZapretKVN in debug mode...
-          "%~dp0ZapretKVN.exe" --show-console
-          pause
-          endlocal
-          "@
-          $launcher | Set-Content "dist/ZapretKVN/Run ZapretKVN Debug.bat" -Encoding ASCII
-
           Write-Host "Build complete:"
           Get-ChildItem dist/ZapretKVN/ | Format-Table Name, Length
 
