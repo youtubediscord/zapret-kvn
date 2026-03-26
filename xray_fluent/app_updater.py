@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -59,9 +60,57 @@ class AppUpdate:
     digest_sha256: str = ""
 
 
-def _parse_version(v: str) -> tuple[int, ...]:
-    clean = v.lstrip("v").split("-")[0]
-    return tuple(int(x) for x in clean.split(".") if x.isdigit())
+_SEMVER_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?")
+
+
+def _parse_semver(version: str) -> tuple[int, int, int, list[str]] | None:
+    match = _SEMVER_RE.search(version.strip().lstrip("v"))
+    if not match:
+        return None
+    major, minor, patch, suffix = match.groups()
+    prerelease = suffix.split(".") if suffix else []
+    return int(major), int(minor), int(patch), prerelease
+
+
+def _compare_prerelease(left: list[str], right: list[str]) -> int:
+    if not left and not right:
+        return 0
+    if not left:
+        return 1
+    if not right:
+        return -1
+
+    for left_part, right_part in zip(left, right):
+        if left_part == right_part:
+            continue
+        left_is_num = left_part.isdigit()
+        right_is_num = right_part.isdigit()
+        if left_is_num and right_is_num:
+            left_num = int(left_part)
+            right_num = int(right_part)
+            if left_num != right_num:
+                return 1 if left_num > right_num else -1
+            continue
+        if left_is_num != right_is_num:
+            return -1 if left_is_num else 1
+        return 1 if left_part > right_part else -1
+
+    if len(left) == len(right):
+        return 0
+    return 1 if len(left) > len(right) else -1
+
+
+def _is_newer_version(latest: str, current: str) -> bool:
+    latest_parts = _parse_semver(latest)
+    current_parts = _parse_semver(current)
+    if latest_parts is None or current_parts is None:
+        return latest.strip().lstrip("v") != current.strip().lstrip("v")
+
+    latest_core = latest_parts[:3]
+    current_core = current_parts[:3]
+    if latest_core != current_core:
+        return latest_core > current_core
+    return _compare_prerelease(latest_parts[3], current_parts[3]) > 0
 
 
 def _extract_digest(value: str) -> str:
@@ -102,10 +151,8 @@ class UpdateChecker(QThread):
                 data = json.loads(resp.read())
 
             tag = data.get("tag_name", "")
-            remote = _parse_version(tag)
-            local = _parse_version(APP_VERSION)
 
-            if remote <= local:
+            if not _is_newer_version(tag, APP_VERSION):
                 self.result.emit(None)
                 return
 
@@ -171,10 +218,17 @@ class UpdateDownloader(QThread):
     finished_ok = pyqtSignal()
     error = pyqtSignal(str)
 
-    def __init__(self, update: AppUpdate, proxy_url: str | None = None, parent=None):
+    def __init__(
+        self,
+        update: AppUpdate,
+        proxy_url: str | None = None,
+        restart_in_tray: bool = False,
+        parent=None,
+    ):
         super().__init__(parent)
         self._update = update
         self._proxy_url = proxy_url
+        self._restart_in_tray = restart_in_tray
 
     # ── download helpers ────────────────────────────────────────
 
@@ -417,7 +471,11 @@ class UpdateDownloader(QThread):
                 "    }",
                 "    throw",
                 "}",
-                "Start-Process -FilePath $exePath",
+                (
+                    "Start-Process -FilePath $exePath -ArgumentList '--tray'"
+                    if self._restart_in_tray
+                    else "Start-Process -FilePath $exePath"
+                ),
                 "Start-Sleep -Seconds 2",
                 "Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue",
                 "",

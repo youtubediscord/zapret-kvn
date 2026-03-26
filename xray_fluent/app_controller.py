@@ -708,6 +708,10 @@ class AppController(QObject):
                 self.status.emit("info", "Обновление Xray уже выполняется")
             return
 
+        if silent and apply_update and self.connected:
+            self._log("[core-update] silent auto-update skipped while connected")
+            return
+
         if apply_update and self.connected:
             self._reconnect_after_xray_update = True
             self.disconnect_current()
@@ -1042,7 +1046,10 @@ class AppController(QObject):
         self.xray_update_result.emit(result)
 
         if result.status == "error":
-            self.status.emit("error", result.message)
+            if not self._xray_update_silent:
+                self.status.emit("error", result.message)
+            else:
+                self._log(f"[core-update] error: {result.message}")
         elif result.status == "updated":
             if not self._xray_update_silent:
                 self.status.emit("success", result.message)

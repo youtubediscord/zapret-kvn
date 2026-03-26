@@ -392,6 +392,15 @@ def check_and_update_xray_core(
             )
 
         expected_hash = _extract_digest(release.digest_sha256)
+        if not expected_hash:
+            return XrayCoreUpdateResult(
+                status="error",
+                message="Для релиза Xray отсутствует контрольная сумма SHA-256",
+                channel=release.channel,
+                current_version=current_version,
+                latest_version=latest_version,
+                updated=False,
+            )
         if expected_hash:
             real_hash = _sha256_file(archive_path)
             if real_hash.lower() != expected_hash.lower():

@@ -189,6 +189,25 @@ def _log_process_exit() -> None:
     _bootstrap_logger.info("----- process exit -----")
 
 
+def _can_start_in_tray() -> bool:
+    try:
+        from xray_fluent.storage import StateStorage
+
+        storage = StateStorage()
+        if storage.is_encrypted():
+            _bootstrap_logger.info("Tray startup disabled: encrypted state requires passphrase")
+            return False
+
+        state = storage.load()
+        if state.security.enabled:
+            _bootstrap_logger.info("Tray startup disabled: master password requires unlock")
+            return False
+        return True
+    except Exception:
+        _bootstrap_logger.exception("Failed to preflight tray startup requirements")
+        return False
+
+
 def _hide_console_if_needed() -> None:
     if sys.platform != "win32" or not getattr(sys, "frozen", False):
         return
@@ -244,6 +263,9 @@ def main() -> int:
     start_hidden = args.tray
     if start_hidden and not tray_available:
         _bootstrap_logger.warning("System tray unavailable; disabling tray startup")
+        start_hidden = False
+    if start_hidden and not _can_start_in_tray():
+        _bootstrap_logger.warning("Tray startup requires interactive unlock; showing window instead")
         start_hidden = False
     _bootstrap_logger.info("system tray available=%s start_hidden=%s", tray_available, start_hidden)
 

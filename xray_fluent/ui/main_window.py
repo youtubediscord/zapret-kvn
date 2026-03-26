@@ -575,7 +575,14 @@ class MainWindow(FluentWindow):
             port = self.controller.state.settings.http_port or DEFAULT_HTTP_PORT
             proxy_url = f"http://{PROXY_HOST}:{port}"
 
-        self._update_downloader = UpdateDownloader(update, proxy_url=proxy_url, parent=self)
+        restart_in_tray = "--tray" in QApplication.arguments()
+
+        self._update_downloader = UpdateDownloader(
+            update,
+            proxy_url=proxy_url,
+            restart_in_tray=restart_in_tray,
+            parent=self,
+        )
         self._update_downloader.progress.connect(self.updates_page.show_download_progress)
         self._update_downloader.status.connect(self.updates_page.set_app_status)
         self._update_downloader.finished_ok.connect(self._on_update_ready)
