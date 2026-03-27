@@ -180,6 +180,11 @@ class SettingsPage(QWidget):
             FIF.GLOBE, "Порт HTTP", "Локальный порт HTTP прокси",
             parent=network_group,
         )
+        self.proxy_bypass_lan_card = SwitchSettingCard(
+            FIF.HOME, "Обход локальной сети",
+            "Не отправлять локальные адреса через системный прокси Windows",
+            parent=network_group,
+        )
         self.reconnect_card = SwitchSettingCard(
             FIF.SYNC, "Переподключение при смене сети",
             "Автоматически переподключаться при смене сетевого адаптера",
@@ -188,6 +193,7 @@ class SettingsPage(QWidget):
 
         network_group.addSettingCard(self.socks_card)
         network_group.addSettingCard(self.http_card)
+        network_group.addSettingCard(self.proxy_bypass_lan_card)
         network_group.addSettingCard(self.reconnect_card)
         root.addWidget(network_group)
 
@@ -371,6 +377,7 @@ class SettingsPage(QWidget):
         self.accent_card.picker.colorChanged.connect(self._auto_save)
         self.socks_card.spin.valueChanged.connect(self._auto_save)
         self.http_card.spin.valueChanged.connect(self._auto_save)
+        self.proxy_bypass_lan_card.checkedChanged.connect(self._auto_save)
         self.xray_path_card.edit.editingFinished.connect(self._auto_save)
         self.singbox_path_card.edit.editingFinished.connect(self._auto_save)
         self.tun_engine_card.combo.currentIndexChanged.connect(self._auto_save)
@@ -401,6 +408,7 @@ class SettingsPage(QWidget):
         self.accent_card.picker.setColor(QColor(settings.accent_color or "#0078D4"))
         self.socks_card.spin.setValue(settings.socks_port)
         self.http_card.spin.setValue(settings.http_port)
+        self.proxy_bypass_lan_card.setChecked(settings.system_proxy_bypass_lan)
         self.xray_path_card.edit.setText(
             normalize_configured_path(
                 settings.xray_path,
@@ -494,6 +502,7 @@ class SettingsPage(QWidget):
         data.accent_color = self.accent_card.picker.color.name() or "#0078D4"
         data.socks_port = int(self.socks_card.spin.value())
         data.http_port = int(self.http_card.spin.value())
+        data.system_proxy_bypass_lan = self.proxy_bypass_lan_card.isChecked()
         data.xray_path = normalize_configured_path(
             self.xray_path_card.edit.text(),
             default_path=XRAY_PATH_DEFAULT,

@@ -36,6 +36,7 @@ class LiveMetricsWorker(QThread):
         clash_api_port: int = 19090,
         socks_port: int = 10808,
         http_port: int = 10809,
+        xray_inbound_tags: list[str] | None = None,
     ):
         super().__init__()
         self._xray_path = xray_path
@@ -50,6 +51,12 @@ class LiveMetricsWorker(QThread):
         self._clash_api_port = clash_api_port
         self._socks_port = socks_port
         self._http_port = http_port
+        normalized_inbound_tags: list[str] = []
+        for tag in xray_inbound_tags or []:
+            clean = str(tag).strip()
+            if clean and clean not in normalized_inbound_tags:
+                normalized_inbound_tags.append(clean)
+        self._xray_inbound_tags = tuple(normalized_inbound_tags)
 
     def stop(self) -> None:
         self._stopped = True
@@ -185,6 +192,8 @@ class LiveMetricsWorker(QThread):
             return None, None
 
     def _query_xray_stats(self) -> tuple[int | None, int | None]:
+        if self._api_port <= 0:
+            return None, None
         exe = resolve_configured_path(
             self._xray_path,
             default_path=XRAY_PATH_DEFAULT,
@@ -216,6 +225,8 @@ class LiveMetricsWorker(QThread):
 
         uplink = 0
         downlink = 0
+        inbound_uplink_stats = {f"inbound>>>{tag}>>>traffic>>>uplink" for tag in self._xray_inbound_tags}
+        inbound_downlink_stats = {f"inbound>>>{tag}>>>traffic>>>downlink" for tag in self._xray_inbound_tags}
 
         for stat in payload.get("stat", []):
             if not isinstance(stat, dict):
@@ -227,15 +238,9 @@ class LiveMetricsWorker(QThread):
             except (TypeError, ValueError):
                 value = 0
 
-            if name in {
-                "inbound>>>socks-in>>>traffic>>>uplink",
-                "inbound>>>http-in>>>traffic>>>uplink",
-            }:
+            if name in inbound_uplink_stats:
                 uplink += value
-            elif name in {
-                "inbound>>>socks-in>>>traffic>>>downlink",
-                "inbound>>>http-in>>>traffic>>>downlink",
-            }:
+            elif name in inbound_downlink_stats:
                 downlink += value
 
         return uplink, downlink

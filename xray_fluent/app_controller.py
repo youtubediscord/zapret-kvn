@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import logging
 import socket
@@ -19,12 +20,17 @@ from .singbox_config_builder import build_singbox_outbound
 from .connectivity_test import ConnectivityTestWorker
 from .constants import (
     APP_NAME,
+    DEFAULT_HTTP_PORT,
+    DEFAULT_SOCKS_PORT,
     DEFAULT_XRAY_STATS_API_PORT,
     LOG_DIR,
+    PROXY_HOST,
     ROUTING_MODES,
     SINGBOX_CLASH_API_PORT,
     SINGBOX_DEFAULT_CONFIG_NAME,
     SINGBOX_TEMPLATES_DIR,
+    XRAY_DEFAULT_CONFIG_NAME,
+    XRAY_TEMPLATES_DIR,
 )
 from .diagnostics import export_diagnostics
 from .link_parser import parse_links_text
@@ -32,6 +38,7 @@ from .live_metrics_worker import LiveMetricsWorker
 from .models import AppSettings, AppState, Node, RoutingSettings
 from .network_monitor import NetworkMonitor
 from .ping_worker import PingWorker
+from .process_presets import PROCESS_PRESETS_BY_ID
 from .speed_test_worker import SpeedTestWorker
 from .proxy_manager import ProxyManager
 from .security import create_password_hash, get_idle_seconds, verify_password
@@ -62,6 +69,11 @@ def _find_free_api_port(preferred: int | None = None, excluded: set[int] | None 
     raise RuntimeError(f"No free port in range {preferred}-{preferred + 100}")
 
 
+_XRAY_METRICS_API_TAG = "__app_metrics_api"
+_XRAY_METRICS_API_INBOUND_TAG = "__app_metrics_api_in"
+_DEFAULT_PROXY_PROCESS_PRESET_IDS = ("chrome", "firefox", "edge", "opera", "discord", "spotify")
+
+
 @dataclass(slots=True)
 class ActiveSessionSnapshot:
     node_id: str | None
@@ -81,6 +93,7 @@ class ActiveSessionSnapshot:
     tun_layer_signature: str
     hybrid: bool
     api_port: int
+    xray_inbound_tags: tuple[str, ...]
     protect_ss_port: int
     protect_ss_password: str
 
@@ -91,6 +104,18 @@ class SingboxRuntimeConfig:
     source_path: Path
     has_proxy_outbound: bool
     used_selected_node: bool
+
+
+@dataclass(slots=True)
+class XrayRuntimeConfig:
+    config: dict[str, Any]
+    source_path: Path
+    has_proxy_outbound: bool
+    used_selected_node: bool
+    socks_port: int
+    http_port: int
+    api_port: int
+    inbound_tags: tuple[str, ...]
 
 
 class AppController(QObject):
@@ -280,12 +305,33 @@ class AppController(QObject):
         settings = settings or self.state.settings
         return bool(settings.tun_mode and str(settings.tun_engine) == "singbox")
 
+    def is_xray_editor_mode(self, settings: AppSettings | None = None) -> bool:
+        settings = settings or self.state.settings
+        return not bool(settings.tun_mode)
+
     def _can_connect_without_selected_node(self, settings: AppSettings | None = None) -> bool:
-        return self.is_singbox_editor_mode(settings)
+        settings = settings or self.state.settings
+        if self.is_singbox_editor_mode(settings):
+            _, _, has_proxy_outbound = self._inspect_active_singbox_config()
+            return not has_proxy_outbound
+        if self.is_xray_editor_mode(settings):
+            _, _, has_proxy_outbound, _, _, _ = self._inspect_active_xray_config()
+            return not has_proxy_outbound
+        return False
+
+    def _system_proxy_bypass_lan(self, settings: AppSettings | None = None) -> bool:
+        # System proxy bypass is an app-level network behavior, not part of raw
+        # core configs and not part of removed RoutingSettings.
+        settings = settings or self.state.settings
+        return bool(settings.system_proxy_bypass_lan)
 
     def get_singbox_config_dir(self) -> Path:
         SINGBOX_TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
         return SINGBOX_TEMPLATES_DIR
+
+    def get_xray_config_dir(self) -> Path:
+        XRAY_TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+        return XRAY_TEMPLATES_DIR
 
     def _normalize_singbox_config_relative_path(self, value: str | Path | None) -> str:
         raw = str(value or "").strip().replace("\\", "/")
@@ -320,6 +366,39 @@ class AppController(QObject):
 
         return resolved
 
+    def _normalize_xray_config_relative_path(self, value: str | Path | None) -> str:
+        raw = str(value or "").strip().replace("\\", "/")
+        if not raw:
+            return XRAY_DEFAULT_CONFIG_NAME
+
+        parts = [part for part in Path(raw).parts if part not in ("", ".", "..", "/")]
+        relative = Path(*parts) if parts else Path(XRAY_DEFAULT_CONFIG_NAME)
+        if not relative.suffix:
+            relative = relative.with_suffix(".json")
+        return relative.as_posix()
+
+    def _resolve_xray_config_path(self, path: str | Path | None = None) -> Path:
+        base_dir = self.get_xray_config_dir().resolve()
+        if path is None or not str(path).strip():
+            relative = Path(self._normalize_xray_config_relative_path(self.state.settings.xray_config_file))
+            resolved = (base_dir / relative).resolve()
+        else:
+            candidate = Path(path)
+            if candidate.is_absolute():
+                resolved = candidate.resolve()
+            else:
+                resolved = (base_dir / self._normalize_xray_config_relative_path(candidate)).resolve()
+
+        if not resolved.suffix:
+            resolved = resolved.with_suffix(".json")
+
+        try:
+            resolved.relative_to(base_dir)
+        except ValueError as exc:
+            raise ValueError("Файл xray должен находиться в data/templates/xray/") from exc
+
+        return resolved
+
     def _set_active_singbox_config_path(self, path: Path, *, emit_signal: bool = True) -> Path:
         resolved = self._resolve_singbox_config_path(path)
         relative = resolved.relative_to(self.get_singbox_config_dir().resolve()).as_posix()
@@ -331,8 +410,20 @@ class AppController(QObject):
         self.schedule_save()
         return resolved
 
+    def _set_active_xray_config_path(self, path: Path, *, emit_signal: bool = True) -> Path:
+        resolved = self._resolve_xray_config_path(path)
+        relative = resolved.relative_to(self.get_xray_config_dir().resolve()).as_posix()
+        if self.state.settings.xray_config_file == relative:
+            return resolved
+        self.state.settings.xray_config_file = relative
+        if emit_signal:
+            self.settings_changed.emit(self.state.settings)
+        self.schedule_save()
+        return resolved
+
     @staticmethod
     def _default_singbox_config_text() -> str:
+        proxy_processes = AppController._default_proxy_process_names()
         payload = {
             "log": {"level": "warn", "timestamp": True},
             "inbounds": [
@@ -361,7 +452,118 @@ class AppController(QObject):
                 },
             ],
             "route": {
-                "final": "proxy",
+                "auto_detect_interface": True,
+                "rules": [
+                    {
+                        "process_name": proxy_processes,
+                        "outbound": "proxy",
+                    }
+                ],
+                "final": "direct",
+            },
+        }
+        return json.dumps(payload, ensure_ascii=True, indent=2) + "\n"
+
+    @staticmethod
+    def _default_xray_config_text() -> str:
+        proxy_processes = AppController._default_proxy_process_names()
+        payload = {
+            "log": {
+                "loglevel": "warning",
+            },
+            "inbounds": [
+                {
+                    "tag": "socks-in",
+                    "listen": PROXY_HOST,
+                    "port": DEFAULT_SOCKS_PORT,
+                    "protocol": "socks",
+                    "settings": {
+                        "auth": "noauth",
+                        "udp": True,
+                    },
+                    "sniffing": {
+                        "enabled": True,
+                        "destOverride": ["http", "tls", "quic"],
+                        "routeOnly": True,
+                    },
+                },
+                {
+                    "tag": "http-in",
+                    "listen": PROXY_HOST,
+                    "port": DEFAULT_HTTP_PORT,
+                    "protocol": "http",
+                    "settings": {},
+                    "sniffing": {
+                        "enabled": True,
+                        "destOverride": ["http", "tls"],
+                        "routeOnly": True,
+                    },
+                },
+                {
+                    "tag": "api",
+                    "listen": PROXY_HOST,
+                    "port": DEFAULT_XRAY_STATS_API_PORT,
+                    "protocol": "dokodemo-door",
+                    "settings": {
+                        "address": PROXY_HOST,
+                    },
+                },
+            ],
+            "outbounds": [
+                {
+                    "tag": "proxy",
+                    "protocol": "freedom",
+                    "settings": {},
+                },
+                {
+                    "tag": "direct",
+                    "protocol": "freedom",
+                    "settings": {},
+                },
+                {
+                    "tag": "block",
+                    "protocol": "blackhole",
+                    "settings": {},
+                },
+                {
+                    "tag": "api",
+                    "protocol": "freedom",
+                    "settings": {},
+                },
+            ],
+            "policy": {
+                "system": {
+                    "statsInboundUplink": True,
+                    "statsInboundDownlink": True,
+                    "statsOutboundUplink": True,
+                    "statsOutboundDownlink": True,
+                }
+            },
+            "stats": {},
+            "api": {
+                "tag": "api",
+                "services": ["StatsService"],
+            },
+            "routing": {
+                "domainStrategy": "AsIs",
+                "rules": [
+                    {
+                        "type": "field",
+                        "inboundTag": ["api"],
+                        "outboundTag": "api",
+                    },
+                    {
+                        "type": "field",
+                        "process": proxy_processes,
+                        "network": "tcp,udp",
+                        "outboundTag": "proxy",
+                    },
+                    {
+                        "type": "field",
+                        "network": "tcp,udp",
+                        "outboundTag": "direct",
+                    },
+                ],
             },
         }
         return json.dumps(payload, ensure_ascii=True, indent=2) + "\n"
@@ -372,6 +574,12 @@ class AppController(QObject):
     def get_active_singbox_config_name(self) -> str:
         return self.get_active_singbox_config_path().name
 
+    def get_active_xray_config_path(self) -> Path:
+        return self._resolve_xray_config_path()
+
+    def get_active_xray_config_name(self) -> str:
+        return self.get_active_xray_config_path().name
+
     def _ensure_active_singbox_config(self, path: str | Path | None = None) -> Path:
         resolved = self._resolve_singbox_config_path(path)
         resolved.parent.mkdir(parents=True, exist_ok=True)
@@ -380,8 +588,20 @@ class AppController(QObject):
         self._set_active_singbox_config_path(resolved)
         return resolved
 
+    def _ensure_active_xray_config(self, path: str | Path | None = None) -> Path:
+        resolved = self._resolve_xray_config_path(path)
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        if not resolved.exists():
+            resolved.write_text(self._default_xray_config_text(), encoding="utf-8")
+        self._set_active_xray_config_path(resolved)
+        return resolved
+
     def load_active_singbox_config_text(self) -> tuple[Path, str]:
         path = self._ensure_active_singbox_config()
+        return path, path.read_text(encoding="utf-8")
+
+    def load_active_xray_config_text(self) -> tuple[Path, str]:
+        path = self._ensure_active_xray_config()
         return path, path.read_text(encoding="utf-8")
 
     def load_singbox_config_text(self, path: str | Path) -> tuple[Path, str]:
@@ -391,10 +611,23 @@ class AppController(QObject):
         self._set_active_singbox_config_path(resolved)
         return resolved, resolved.read_text(encoding="utf-8")
 
+    def load_xray_config_text(self, path: str | Path) -> tuple[Path, str]:
+        resolved = self._resolve_xray_config_path(path)
+        if not resolved.exists():
+            raise FileNotFoundError(f"Файл не найден: {resolved.name}")
+        self._set_active_xray_config_path(resolved)
+        return resolved, resolved.read_text(encoding="utf-8")
+
     def save_singbox_config_text(self, text: str, path: str | Path | None = None) -> Path:
         resolved = self._ensure_active_singbox_config(path)
         resolved.write_text(text, encoding="utf-8")
         self._set_active_singbox_config_path(resolved)
+        return resolved
+
+    def save_xray_config_text(self, text: str, path: str | Path | None = None) -> Path:
+        resolved = self._ensure_active_xray_config(path)
+        resolved.write_text(text, encoding="utf-8")
+        self._set_active_xray_config_path(resolved)
         return resolved
 
     @staticmethod
@@ -406,15 +639,21 @@ class AppController(QObject):
             caret = "\n" + (" " * max(0, exc.colno - 1)) + "^"
         return f"Ошибка синтаксиса JSON: {exc.msg} (строка {exc.lineno}, столбец {exc.colno})\n{line}{caret}".rstrip()
 
-    def validate_singbox_json_text(self, text: str) -> tuple[bool, str]:
+    def validate_json_text(self, text: str) -> tuple[bool, str]:
         try:
             json.loads(text)
         except json.JSONDecodeError as exc:
             return False, self._format_json_error_message(text, exc)
         return True, "JSON корректен."
 
+    def validate_singbox_json_text(self, text: str) -> tuple[bool, str]:
+        return self.validate_json_text(text)
+
+    def validate_xray_json_text(self, text: str) -> tuple[bool, str]:
+        return self.validate_json_text(text)
+
     def apply_singbox_config_text(self, text: str) -> tuple[bool, Path | None, str]:
-        ok, message = self.validate_singbox_json_text(text)
+        ok, message = self.validate_json_text(text)
         if not ok:
             return False, None, message
 
@@ -426,6 +665,19 @@ class AppController(QObject):
 
         return True, path, "Конфиг сохранён. Он будет использован при следующем запуске sing-box."
 
+    def apply_xray_config_text(self, text: str) -> tuple[bool, Path | None, str]:
+        ok, message = self.validate_json_text(text)
+        if not ok:
+            return False, None, message
+
+        path = self.save_xray_config_text(text)
+        if self._active_core == "xray" and (self.connected or self._desired_connected) and not self.state.settings.tun_mode:
+            self._desired_connected = True
+            self._request_transition("xray config applied")
+            return True, path, "Конфиг сохранён. Применяю изменения xray..."
+
+        return True, path, "Конфиг сохранён. Он будет использован при следующем запуске xray."
+
     @staticmethod
     def _config_has_proxy_outbound(payload: Any) -> bool:
         if not isinstance(payload, dict):
@@ -434,6 +686,165 @@ class AppController(QObject):
         if not isinstance(outbounds, list):
             return False
         return any(isinstance(outbound, dict) and outbound.get("tag") == "proxy" for outbound in outbounds)
+
+    @staticmethod
+    def _ensure_dict(parent: dict[str, Any], key: str) -> dict[str, Any]:
+        value = parent.get(key)
+        if isinstance(value, dict):
+            return value
+        created: dict[str, Any] = {}
+        parent[key] = created
+        return created
+
+    @staticmethod
+    def _ensure_list(parent: dict[str, Any], key: str) -> list[Any]:
+        value = parent.get(key)
+        if isinstance(value, list):
+            return value
+        created: list[Any] = []
+        parent[key] = created
+        return created
+
+    @staticmethod
+    def _replace_or_append_tagged(items: list[Any], tag: str, payload: dict[str, Any]) -> None:
+        for index, item in enumerate(items):
+            if isinstance(item, dict) and str(item.get("tag") or "") == tag:
+                items[index] = payload
+                return
+        items.append(payload)
+
+    @staticmethod
+    def _collect_xray_inbound_ports(payload: Any) -> set[int]:
+        ports: set[int] = set()
+        if not isinstance(payload, dict):
+            return ports
+        for inbound in payload.get("inbounds") or []:
+            if not isinstance(inbound, dict):
+                continue
+            try:
+                port = int(inbound.get("port") or 0)
+            except (TypeError, ValueError):
+                port = 0
+            if port > 0:
+                ports.add(port)
+        return ports
+
+    def _ensure_singbox_metrics_contract(self, payload: dict[str, Any]) -> None:
+        experimental = self._ensure_dict(payload, "experimental")
+        clash_api = self._ensure_dict(experimental, "clash_api")
+        clash_api["external_controller"] = f"127.0.0.1:{SINGBOX_CLASH_API_PORT}"
+
+    def _ensure_xray_metrics_contract(
+        self,
+        payload: dict[str, Any],
+        *,
+        allocate_port: bool,
+    ) -> tuple[int, tuple[str, ...]]:
+        stats = payload.get("stats")
+        if not isinstance(stats, dict):
+            payload["stats"] = {}
+
+        policy = self._ensure_dict(payload, "policy")
+        system_policy = self._ensure_dict(policy, "system")
+        system_policy["statsInboundUplink"] = True
+        system_policy["statsInboundDownlink"] = True
+        system_policy["statsOutboundUplink"] = True
+        system_policy["statsOutboundDownlink"] = True
+
+        api = self._ensure_dict(payload, "api")
+        api_tag = _XRAY_METRICS_API_TAG
+        api["tag"] = api_tag
+        services = api.get("services")
+        normalized_services = [str(item) for item in services] if isinstance(services, list) else []
+        if "StatsService" not in normalized_services:
+            normalized_services.append("StatsService")
+        api["services"] = normalized_services
+
+        inbounds = self._ensure_list(payload, "inbounds")
+        existing_ports = self._collect_xray_inbound_ports(payload)
+
+        preferred_api_port = 0
+        for inbound in inbounds:
+            if not isinstance(inbound, dict):
+                continue
+            if str(inbound.get("tag") or "") != _XRAY_METRICS_API_INBOUND_TAG:
+                continue
+            try:
+                preferred_api_port = int(inbound.get("port") or 0)
+            except (TypeError, ValueError):
+                preferred_api_port = 0
+            if preferred_api_port > 0:
+                existing_ports.discard(preferred_api_port)
+            break
+
+        if preferred_api_port > 0:
+            api_port = preferred_api_port
+        elif allocate_port:
+            try:
+                api_port = _find_free_api_port(excluded=existing_ports)
+            except RuntimeError as exc:
+                raise ValueError("Не удалось выделить локальный порт для Xray metrics API.") from exc
+        else:
+            api_port = 0
+
+        metrics_inbound = {
+            "tag": _XRAY_METRICS_API_INBOUND_TAG,
+            "listen": PROXY_HOST,
+            "port": api_port,
+            "protocol": "dokodemo-door",
+            "settings": {
+                "address": PROXY_HOST,
+            },
+        }
+        self._replace_or_append_tagged(inbounds, _XRAY_METRICS_API_INBOUND_TAG, metrics_inbound)
+
+        outbounds = self._ensure_list(payload, "outbounds")
+        has_api_outbound = any(
+            isinstance(outbound, dict) and str(outbound.get("tag") or "") == api_tag
+            for outbound in outbounds
+        )
+        if not has_api_outbound:
+            outbounds.append(
+                {
+                    "tag": api_tag,
+                    "protocol": "freedom",
+                    "settings": {},
+                }
+            )
+
+        user_inbound_tags: list[str] = []
+        for index, inbound in enumerate(inbounds):
+            if not isinstance(inbound, dict):
+                continue
+            tag = str(inbound.get("tag") or "").strip()
+            if tag == _XRAY_METRICS_API_INBOUND_TAG:
+                continue
+            if not tag:
+                tag = f"__app_user_inbound_{index}"
+                inbound["tag"] = tag
+            if tag not in user_inbound_tags:
+                user_inbound_tags.append(tag)
+
+        routing = self._ensure_dict(payload, "routing")
+        rules = self._ensure_list(routing, "rules")
+        metrics_rule = {
+            "type": "field",
+            "inboundTag": [_XRAY_METRICS_API_INBOUND_TAG],
+            "outboundTag": api_tag,
+        }
+        replaced = False
+        for index, rule in enumerate(rules):
+            if not isinstance(rule, dict):
+                continue
+            inbound_tags = rule.get("inboundTag")
+            if isinstance(inbound_tags, list) and _XRAY_METRICS_API_INBOUND_TAG in [str(item) for item in inbound_tags]:
+                rules[index] = metrics_rule
+                replaced = True
+                break
+        if not replaced:
+            rules.insert(0, metrics_rule)
+
+        return api_port, tuple(user_inbound_tags)
 
     def _inspect_active_singbox_config(self) -> tuple[Path, str, bool]:
         path, text = self.load_active_singbox_config_text()
@@ -447,6 +858,59 @@ class AppController(QObject):
             has_proxy_outbound = self._config_has_proxy_outbound(payload)
         return path, text_hash, has_proxy_outbound
 
+    @staticmethod
+    def _extract_xray_runtime_ports(payload: Any) -> tuple[int, int, int]:
+        socks_port = 0
+        http_port = 0
+        api_port = 0
+        mixed_port = 0
+        if not isinstance(payload, dict):
+            return socks_port, http_port, api_port
+        for inbound in payload.get("inbounds") or []:
+            if not isinstance(inbound, dict):
+                continue
+            protocol = str(inbound.get("protocol") or "").strip().lower()
+            tag = str(inbound.get("tag") or "").strip().lower()
+            port_raw = inbound.get("port")
+            try:
+                port = int(port_raw or 0)
+            except (TypeError, ValueError):
+                port = 0
+            if port <= 0:
+                continue
+            if protocol == "socks" and socks_port <= 0:
+                socks_port = port
+            elif protocol == "http" and http_port <= 0:
+                http_port = port
+            elif protocol == "mixed" and mixed_port <= 0:
+                mixed_port = port
+            elif tag == "api" and api_port <= 0:
+                api_port = port
+            elif tag == _XRAY_METRICS_API_INBOUND_TAG and api_port <= 0:
+                api_port = port
+        if socks_port <= 0 and mixed_port > 0:
+            socks_port = mixed_port
+        if http_port <= 0 and mixed_port > 0:
+            http_port = mixed_port
+        return socks_port, http_port, api_port
+
+    def _inspect_active_xray_config(self) -> tuple[Path, str, bool, int, int, int]:
+        path, text = self.load_active_xray_config_text()
+        text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        has_proxy_outbound = False
+        socks_port = 0
+        http_port = 0
+        api_port = 0
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            payload = None
+        if payload is not None:
+            self._ensure_xray_metrics_contract(payload, allocate_port=False)
+            has_proxy_outbound = self._config_has_proxy_outbound(payload)
+            socks_port, http_port, api_port = self._extract_xray_runtime_ports(payload)
+        return path, text_hash, has_proxy_outbound, socks_port, http_port, api_port
+
     def _build_runtime_singbox_config(self, node: Node | None = None) -> SingboxRuntimeConfig:
         source_path, text = self.load_active_singbox_config_text()
         try:
@@ -457,6 +921,8 @@ class AppController(QObject):
         if not isinstance(payload, dict):
             raise ValueError("Корень sing-box config должен быть JSON-объектом.")
 
+        self._ensure_singbox_metrics_contract(payload)
+
         outbounds = payload.get("outbounds")
         has_proxy_outbound = False
         used_selected_node = False
@@ -465,12 +931,13 @@ class AppController(QObject):
                 if not isinstance(outbound, dict) or outbound.get("tag") != "proxy":
                     continue
                 has_proxy_outbound = True
-                if node is not None:
-                    try:
-                        outbounds[index] = build_singbox_outbound(node, tag="proxy")
-                    except ValueError as exc:
-                        raise ValueError(f"Не удалось заменить outbound tag `proxy`: {exc}") from exc
-                    used_selected_node = True
+                if node is None:
+                    raise ValueError("В конфиге есть outbound tag `proxy`. Выберите сервер для запуска sing-box.")
+                try:
+                    outbounds[index] = build_singbox_outbound(node, tag="proxy")
+                except ValueError as exc:
+                    raise ValueError(f"Не удалось заменить outbound tag `proxy`: {exc}") from exc
+                used_selected_node = True
                 break
 
         return SingboxRuntimeConfig(
@@ -478,6 +945,46 @@ class AppController(QObject):
             source_path=source_path,
             has_proxy_outbound=has_proxy_outbound,
             used_selected_node=used_selected_node,
+        )
+
+    def _build_runtime_xray_config(self, node: Node | None = None) -> XrayRuntimeConfig:
+        source_path, text = self.load_active_xray_config_text()
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{source_path.name}: {self._format_json_error_message(text, exc)}") from exc
+
+        if not isinstance(payload, dict):
+            raise ValueError("Корень xray config должен быть JSON-объектом.")
+
+        api_port, inbound_tags = self._ensure_xray_metrics_contract(payload, allocate_port=True)
+
+        outbounds = payload.get("outbounds")
+        has_proxy_outbound = False
+        used_selected_node = False
+        if isinstance(outbounds, list):
+            for index, outbound in enumerate(outbounds):
+                if not isinstance(outbound, dict) or outbound.get("tag") != "proxy":
+                    continue
+                has_proxy_outbound = True
+                if node is None:
+                    raise ValueError("В конфиге есть outbound tag `proxy`. Выберите сервер для запуска xray.")
+                proxy_outbound = deepcopy(node.outbound)
+                proxy_outbound["tag"] = "proxy"
+                outbounds[index] = proxy_outbound
+                used_selected_node = True
+                break
+
+        socks_port, http_port, _ = self._extract_xray_runtime_ports(payload)
+        return XrayRuntimeConfig(
+            config=payload,
+            source_path=source_path,
+            has_proxy_outbound=has_proxy_outbound,
+            used_selected_node=used_selected_node,
+            socks_port=socks_port,
+            http_port=http_port,
+            api_port=api_port,
+            inbound_tags=inbound_tags,
         )
 
     def _transition_signature(
@@ -500,6 +1007,24 @@ class AppController(QObject):
                     "has_proxy_outbound": has_proxy_outbound,
                     "node_id": node.id if has_proxy_outbound and node else None,
                     "node_outbound": node.outbound if has_proxy_outbound and node else None,
+                }
+            )
+        if self.is_xray_editor_mode(settings):
+            source_path, config_hash, has_proxy_outbound, socks_port, http_port, api_port = self._inspect_active_xray_config()
+            return self._signature(
+                {
+                    "mode": "xray-editor",
+                    "xray_path": str(settings.xray_path),
+                    "config_file": str(source_path.name),
+                    "config_hash": config_hash,
+                    "has_proxy_outbound": has_proxy_outbound,
+                    "node_id": node.id if has_proxy_outbound and node else None,
+                    "node_outbound": node.outbound if has_proxy_outbound and node else None,
+                    "proxy_enabled": bool(settings.enable_system_proxy),
+                    "proxy_bypass_lan": self._system_proxy_bypass_lan(settings),
+                    "socks_port": int(socks_port),
+                    "http_port": int(http_port),
+                    "api_port": int(api_port),
                 }
             )
         return self._signature(
@@ -526,6 +1051,22 @@ class AppController(QObject):
         settings = settings or self.state.settings
         routing = routing or self.state.routing
         node = node or self.selected_node
+        if self.is_xray_editor_mode(settings):
+            source_path, config_hash, has_proxy_outbound, socks_port, http_port, api_port = self._inspect_active_xray_config()
+            return self._signature(
+                {
+                    "mode": "xray-editor",
+                    "xray_path": str(settings.xray_path),
+                    "config_file": str(source_path.name),
+                    "config_hash": config_hash,
+                    "has_proxy_outbound": has_proxy_outbound,
+                    "node_id": node.id if has_proxy_outbound and node else None,
+                    "node_outbound": node.outbound if has_proxy_outbound and node else None,
+                    "socks_port": int(socks_port),
+                    "http_port": int(http_port),
+                    "api_port": int(api_port),
+                }
+            )
         return self._signature(
             {
                 "node_id": node.id if node else None,
@@ -577,12 +1118,22 @@ class AppController(QObject):
         tun: bool,
         core: str,
         api_port: int,
+        socks_port: int | None = None,
+        http_port: int | None = None,
+        xray_inbound_tags: tuple[str, ...] | None = None,
         protect_ss_port: int = 0,
         protect_ss_password: str = "",
     ) -> None:
         settings = self.state.settings
         routing = self.state.routing
         hybrid = False
+        if socks_port is None:
+            socks_port = int(settings.socks_port)
+        if http_port is None:
+            http_port = int(settings.http_port)
+        if xray_inbound_tags is None:
+            xray_inbound_tags = ()
+        proxy_bypass_lan = bool(routing.bypass_lan) if tun else self._system_proxy_bypass_lan(settings)
         self._active_session = ActiveSessionSnapshot(
             node_id=node.id if node else None,
             node_server=node.server if node else "",
@@ -590,17 +1141,18 @@ class AppController(QObject):
             tun_mode=bool(tun),
             tun_engine=str(settings.tun_engine),
             proxy_enabled=bool(settings.enable_system_proxy),
-            proxy_bypass_lan=bool(routing.bypass_lan),
+            proxy_bypass_lan=proxy_bypass_lan,
             xray_path=str(settings.xray_path),
             singbox_path=str(settings.singbox_path),
-            socks_port=int(settings.socks_port),
-            http_port=int(settings.http_port),
+            socks_port=int(socks_port),
+            http_port=int(http_port),
             routing_signature=self._routing_signature(routing),
             transition_signature=self._transition_signature(node, settings, routing),
             xray_layer_signature=self._xray_layer_signature(node, settings, routing),
             tun_layer_signature=self._tun_layer_signature(node, settings, routing),
             hybrid=hybrid,
             api_port=int(api_port),
+            xray_inbound_tags=tuple(xray_inbound_tags),
             protect_ss_port=int(protect_ss_port),
             protect_ss_password=str(protect_ss_password),
         )
@@ -611,13 +1163,15 @@ class AppController(QObject):
 
     def _apply_proxy_runtime_change(self) -> bool:
         settings = self.state.settings
-        routing = self.state.routing
+        bypass_lan = self._system_proxy_bypass_lan()
+        socks_port = self._active_session.socks_port if self._active_session else settings.socks_port
+        http_port = self._active_session.http_port if self._active_session else settings.http_port
         try:
             if settings.enable_system_proxy:
                 self.proxy.enable(
-                    settings.http_port,
-                    settings.socks_port,
-                    bypass_lan=routing.bypass_lan,
+                    http_port,
+                    socks_port,
+                    bypass_lan=bypass_lan,
                 )
             else:
                 self.proxy.disable(restore_previous=True)
@@ -630,12 +1184,15 @@ class AppController(QObject):
             return False
 
         node = self.selected_node
-        if node is not None and self.connected:
+        if self.connected:
             self._capture_active_session(
                 node,
                 tun=False,
                 core="xray",
                 api_port=self._active_session.api_port if self._active_session else self._xray_api_port,
+                socks_port=socks_port,
+                http_port=http_port,
+                xray_inbound_tags=self._active_session.xray_inbound_tags if self._active_session else (),
             )
         return True
 
@@ -662,14 +1219,15 @@ class AppController(QObject):
             return False
         return (
             session.proxy_enabled != bool(settings.enable_system_proxy)
-            or session.proxy_bypass_lan != bool(self.state.routing.bypass_lan)
+            or session.proxy_bypass_lan != self._system_proxy_bypass_lan()
         )
 
     def _can_proxy_hot_swap(self, session: ActiveSessionSnapshot) -> bool:
         settings = self.state.settings
         if session.active_core != "xray" or session.tun_mode or settings.tun_mode:
             return False
-        if session.socks_port != int(settings.socks_port) or session.http_port != int(settings.http_port):
+        _, _, _, socks_port, http_port, _ = self._inspect_active_xray_config()
+        if session.socks_port != int(socks_port) or session.http_port != int(http_port):
             return False
         return session.xray_layer_signature != self._xray_layer_signature()
 
@@ -884,10 +1442,19 @@ class AppController(QObject):
 
     def export_runtime_config_json(self, node_id: str | None = None) -> str | None:
         node = self._get_node_by_id(node_id) if node_id else self.selected_node
-        if not node:
+        try:
+            if self.is_singbox_editor_mode():
+                runtime = self._build_runtime_singbox_config(node)
+                return json.dumps(runtime.config, ensure_ascii=True, indent=2)
+            if self.is_xray_editor_mode():
+                runtime = self._build_runtime_xray_config(node)
+                return json.dumps(runtime.config, ensure_ascii=True, indent=2)
+            if not node:
+                return None
+            cfg = build_xray_config(node, self.state.routing, self.state.settings)
+            return json.dumps(cfg, ensure_ascii=True, indent=2)
+        except ValueError:
             return None
-        cfg = build_xray_config(node, self.state.routing, self.state.settings)
-        return json.dumps(cfg, ensure_ascii=True, indent=2)
 
     def import_nodes_from_text(self, text: str) -> tuple[int, list[str]]:
         nodes, errors = parse_links_text(text)
@@ -942,6 +1509,9 @@ class AppController(QObject):
         if not should_reconcile:
             return
         if self.state.selected_node_id is None:
+            if self._can_connect_without_selected_node():
+                self._request_transition("active node removed")
+                return
             self._desired_connected = False
             self._request_transition("active node removed")
             return
@@ -1151,8 +1721,12 @@ class AppController(QObject):
 
             node = self.selected_node
             singbox_editor_mode = self.is_singbox_editor_mode()
+            xray_editor_mode = self.is_xray_editor_mode()
             if node is None and not self._can_connect_without_selected_node():
-                self._set_connection_status("error", "Сначала выберите сервер.", level="warning")
+                message = "Сначала выберите сервер."
+                if singbox_editor_mode or xray_editor_mode:
+                    message = "В конфиге есть outbound tag `proxy`. Сначала выберите сервер."
+                self._set_connection_status("error", message, level="warning")
                 return False
 
             self._reset_auto_switch_state(
@@ -1163,7 +1737,7 @@ class AppController(QObject):
             prev_active_core = self._active_core
             tun = self.state.settings.tun_mode
             self._xray_api_port = 0
-            if not singbox_editor_mode:
+            if tun and not singbox_editor_mode:
                 try:
                     self._xray_api_port = _find_free_api_port(
                         excluded={self.state.settings.socks_port, self.state.settings.http_port},
@@ -1173,7 +1747,13 @@ class AppController(QObject):
                     return False
 
             runtime_singbox: SingboxRuntimeConfig | None = None
-            session_label = node.name if node else self.get_active_singbox_config_name()
+            runtime_xray: XrayRuntimeConfig | None = None
+            if singbox_editor_mode:
+                session_label = node.name if node else self.get_active_singbox_config_name()
+            elif xray_editor_mode:
+                session_label = node.name if node else self.get_active_xray_config_name()
+            else:
+                session_label = node.name if node else "unknown"
 
             if tun:
                 self._log(f"[tun] attempting TUN connect, admin={_is_admin()}")
@@ -1252,18 +1832,41 @@ class AppController(QObject):
             else:
                 self._active_core = "xray"
                 self._set_connection_status("starting", f"Запуск прокси: {session_label}...", level="info")
-                config = build_xray_config(node, self.state.routing, self.state.settings, api_port=self._xray_api_port)
-                ok = self.xray.start(self.state.settings.xray_path, config)
+                try:
+                    runtime_xray = self._build_runtime_xray_config(node)
+                except ValueError as exc:
+                    self._active_core = prev_active_core
+                    self._set_connection_status("error", str(exc), level="error")
+                    return False
+
+                session_label = runtime_xray.source_path.name
+                if runtime_xray.used_selected_node and node is not None:
+                    session_label = f"{runtime_xray.source_path.name} / {node.name}"
+                self._set_connection_status("starting", f"Запуск прокси: {session_label}...", level="info")
+                if runtime_xray.used_selected_node and node is not None:
+                    self._log(f"[xray] outbound tag 'proxy' replaced from selected node: {node.name}")
+
+                self._xray_api_port = runtime_xray.api_port
+                ok = self.xray.start(self.state.settings.xray_path, runtime_xray.config)
                 if not ok:
                     self._active_core = prev_active_core
                     return False
 
                 if self.state.settings.enable_system_proxy:
+                    if runtime_xray.http_port <= 0 or runtime_xray.socks_port <= 0:
+                        self.xray.stop()
+                        self._set_connection_status(
+                            "error",
+                            "В raw xray config нет HTTP/SOCKS inbound портов для включения системного прокси.",
+                            level="error",
+                        )
+                        self._active_core = prev_active_core
+                        return False
                     try:
                         self.proxy.enable(
-                            self.state.settings.http_port,
-                            self.state.settings.socks_port,
-                            bypass_lan=self.state.routing.bypass_lan,
+                            runtime_xray.http_port,
+                            runtime_xray.socks_port,
+                            bypass_lan=self._system_proxy_bypass_lan(),
                         )
                     except Exception as exc:
                         self.xray.stop()
@@ -1274,9 +1877,13 @@ class AppController(QObject):
                         )
                         self._active_core = prev_active_core
                         return False
+                else:
+                    self.proxy.disable(restore_previous=True)
 
             session_node = node
             if singbox_editor_mode and runtime_singbox is not None and not runtime_singbox.used_selected_node:
+                session_node = None
+            if xray_editor_mode and runtime_xray is not None and not runtime_xray.used_selected_node:
                 session_node = None
 
             if session_node is not None:
@@ -1292,6 +1899,9 @@ class AppController(QObject):
                 tun=tun,
                 core=self._active_core,
                 api_port=self._xray_api_port,
+                socks_port=runtime_xray.socks_port if runtime_xray is not None else None,
+                http_port=runtime_xray.http_port if runtime_xray is not None else None,
+                xray_inbound_tags=runtime_xray.inbound_tags if runtime_xray is not None else ("socks-in", "http-in"),
                 protect_ss_port=self._protect_ss_port,
                 protect_ss_password=self._protect_ss_password,
             )
@@ -1326,30 +1936,45 @@ class AppController(QObject):
 
     def _restart_proxy_core(self, reason: str) -> bool:
         node = self.selected_node
-        if node is None:
-            return False
-
         self._switching = True
         try:
             self._log(f"[proxy-hot-swap] {reason}")
-            self._set_connection_status("starting", f"Переключение на {node.name}...", level="info")
+            try:
+                runtime_xray = self._build_runtime_xray_config(node)
+            except ValueError as exc:
+                self._set_connection_status("error", str(exc), level="error")
+                return False
+
+            session_label = runtime_xray.source_path.name
+            if runtime_xray.used_selected_node and node is not None:
+                session_label = f"{runtime_xray.source_path.name} / {node.name}"
+            self._set_connection_status("starting", f"Переключение на {session_label}...", level="info")
             self._stop_metrics_worker()
             if self.xray.is_running and not self.xray.stop():
                 self._set_connection_status("error", "Не удалось остановить предыдущий процесс Xray", level="error")
                 return False
 
-            config = build_xray_config(node, self.state.routing, self.state.settings, api_port=self._xray_api_port)
-            ok = self.xray.start(self.state.settings.xray_path, config)
+            self._xray_api_port = runtime_xray.api_port
+            ok = self.xray.start(self.state.settings.xray_path, runtime_xray.config)
             if not ok:
                 self._handle_unexpected_disconnect()
                 return False
 
             if self.state.settings.enable_system_proxy:
+                if runtime_xray.http_port <= 0 or runtime_xray.socks_port <= 0:
+                    self.xray.stop()
+                    self._set_connection_status(
+                        "error",
+                        "В raw xray config нет HTTP/SOCKS inbound портов для включения системного прокси.",
+                        level="error",
+                    )
+                    self._handle_unexpected_disconnect()
+                    return False
                 try:
                     self.proxy.enable(
-                        self.state.settings.http_port,
-                        self.state.settings.socks_port,
-                        bypass_lan=self.state.routing.bypass_lan,
+                        runtime_xray.http_port,
+                        runtime_xray.socks_port,
+                        bypass_lan=self._system_proxy_bypass_lan(),
                     )
                 except Exception as exc:
                     self.xray.stop()
@@ -1363,14 +1988,19 @@ class AppController(QObject):
             else:
                 self.proxy.disable(restore_previous=True)
 
-            node.last_used_at = datetime.now(timezone.utc).isoformat()
+            session_node = node if runtime_xray.used_selected_node else None
+            if session_node is not None:
+                session_node.last_used_at = datetime.now(timezone.utc).isoformat()
             self._capture_active_session(
-                node,
+                session_node,
                 tun=False,
                 core="xray",
                 api_port=self._xray_api_port,
+                socks_port=runtime_xray.socks_port,
+                http_port=runtime_xray.http_port,
+                xray_inbound_tags=runtime_xray.inbound_tags,
             )
-            self._set_connection_status("running", f"Переключено: {node.name}", level="success")
+            self._set_connection_status("running", f"Переключено: {session_label}", level="success")
             self.save()
             return True
         finally:
@@ -1425,7 +2055,7 @@ class AppController(QObject):
         self.schedule_save()
 
         if self.connected or self._desired_connected:
-            if self._active_core == "singbox" or self.is_singbox_editor_mode():
+            if not self.state.settings.tun_mode or self._active_core == "singbox" or self.is_singbox_editor_mode():
                 return
             self._request_transition("routing changed")
 
@@ -1457,7 +2087,7 @@ class AppController(QObject):
                 self._desired_connected = True
                 self._request_transition("TUN engine changed")
                 return
-            if ports_changed:
+            if ports_changed and settings.tun_mode and settings.tun_engine == "tun2socks":
                 self._desired_connected = True
                 self._request_transition("proxy ports changed")
                 return
@@ -1545,8 +2175,17 @@ class AppController(QObject):
             self.status.emit("info", "Тест подключения уже выполняется")
             return
 
+        http_port = self.state.settings.http_port
+        if not self.state.settings.tun_mode:
+            if self._active_session is not None and self._active_session.http_port > 0:
+                http_port = self._active_session.http_port
+            else:
+                _, _, _, _, inspected_http_port, _ = self._inspect_active_xray_config()
+                if inspected_http_port > 0:
+                    http_port = inspected_http_port
+
         self._connectivity_worker = ConnectivityTestWorker(
-            self.state.settings.http_port, target, tun_mode=self.state.settings.tun_mode,
+            http_port, target, tun_mode=self.state.settings.tun_mode,
         )
         self._connectivity_worker.result.connect(self._on_connectivity_result)
         self._connectivity_worker.start()
@@ -1596,15 +2235,19 @@ class AppController(QObject):
 
         self._stop_metrics_worker()
         mode = "singbox" if self._active_core == "singbox" else "xray"
+        socks_port = self._active_session.socks_port if self._active_session else self.state.settings.socks_port
+        http_port = self._active_session.http_port if self._active_session else self.state.settings.http_port
+        inbound_tags = self._active_session.xray_inbound_tags if self._active_session else ()
         self._metrics_worker = LiveMetricsWorker(
             self.state.settings.xray_path,
-            self._xray_api_port or DEFAULT_XRAY_STATS_API_PORT,
+            self._xray_api_port,
             ping_host=ping_host,
             ping_port=ping_port,
             mode=mode,
             clash_api_port=SINGBOX_CLASH_API_PORT,
-            socks_port=self.state.settings.socks_port,
-            http_port=self.state.settings.http_port,
+            socks_port=socks_port,
+            http_port=http_port,
+            xray_inbound_tags=list(inbound_tags),
         )
         self._metrics_worker.metrics.connect(self._on_live_metrics)
         self._metrics_worker.start()
@@ -2017,6 +2660,7 @@ class AppController(QObject):
                         tun=True,
                         core="tun2socks",
                         api_port=self._xray_api_port,
+                        xray_inbound_tags=("socks-in", "http-in"),
                     )
                     self._set_connection_status("running", f"Переключено: {node.name} (TUN)", level="success")
                     self.save()

@@ -569,11 +569,17 @@ class DashboardPage(QWidget):
         self.traffic_peak_label.setText(f"Пик: {_format_speed(self._peak_bps)}")
 
     def _refresh_routing_card(self) -> None:
+        if not self._settings.tun_mode:
+            self.routing_mode_label.setText("Routing из raw xray config")
+            self.routing_dns_label.setText("DNS берётся из editor JSON")
+            self.routing_rules_label.setText("GUI routing не влияет на direct xray launch")
+            self.routing_bypass_label.setText("Эти настройки используются только для tun2socks helper-path")
+            return
         if self._settings.tun_mode and self._settings.tun_engine == "singbox":
             self.routing_mode_label.setText("Routing из raw sing-box config")
             self.routing_dns_label.setText("DNS берётся из editor JSON")
             self.routing_rules_label.setText("GUI routing не влияет на sing-box")
-            self.routing_bypass_label.setText("Эти настройки используются только для Xray и tun2socks")
+            self.routing_bypass_label.setText("Эти настройки используются только для tun2socks helper-path")
             return
         self.routing_mode_label.setText(_mode_title(self._routing.mode))
         self.routing_dns_label.setText(f"DNS: {self._routing.dns_mode.title()}")
@@ -682,9 +688,10 @@ class DashboardPage(QWidget):
     def _route_engine_label(self) -> str:
         if self._settings.tun_mode:
             return "Режим VPN (TUN)"
+        config_name = Path(self._settings.xray_config_file or "default.json").name
         if self._settings.enable_system_proxy:
-            return f"Системный прокси  HTTP {self._settings.http_port} / SOCKS {self._settings.socks_port}"
-        return f"Локальный прокси  HTTP {self._settings.http_port} / SOCKS {self._settings.socks_port}"
+            return f"Системный прокси  xray config: {config_name}"
+        return f"Локальный прокси  xray config: {config_name}"
 
     def _default_connection_message(self) -> str:
         action = "VPN" if self._settings.tun_mode else "Прокси"
@@ -693,6 +700,10 @@ class DashboardPage(QWidget):
     def _singbox_editor_summary(self) -> str:
         config_name = Path(self._settings.singbox_config_file or "default.json").name
         return f"sing-box config: {config_name}"
+
+    def _xray_editor_summary(self) -> str:
+        config_name = Path(self._settings.xray_config_file or "default.json").name
+        return f"xray config: {config_name}"
 
     def _connection_texts(self) -> tuple[str, str]:
         if self._connection_phase == "starting":
@@ -712,6 +723,8 @@ class DashboardPage(QWidget):
         if self._selected_node is None:
             if self._settings.tun_mode and self._settings.tun_engine == "singbox":
                 return self._singbox_editor_summary()
+            if not self._settings.tun_mode:
+                return self._xray_editor_summary()
             return "Активный профиль не выбран"
         group = self._selected_node.group or "По умолчанию"
         scheme = self._selected_node.scheme.upper() if self._selected_node.scheme else "NODE"
@@ -728,6 +741,12 @@ class DashboardPage(QWidget):
                     f"Готов к запуску: {self._singbox_editor_summary()}"
                     if not self._connected
                     else f"Активный сеанс: {self._singbox_editor_summary()}"
+                )
+            if not self._settings.tun_mode:
+                return (
+                    f"Готов к запуску: {self._xray_editor_summary()}"
+                    if not self._connected
+                    else f"Активный сеанс: {self._xray_editor_summary()}"
                 )
             return "Выберите узел, чтобы запустить прокси или VPN и просмотреть состояние сеанса."
         if self._connected:
@@ -770,9 +789,11 @@ class DashboardPage(QWidget):
         self._apply_interaction_state()
 
     def _apply_interaction_state(self) -> None:
-        has_profiles = bool(self._nodes) or (self._settings.tun_mode and self._settings.tun_engine == "singbox")
+        has_profiles = bool(self._nodes) or not self._settings.tun_mode or (
+            self._settings.tun_mode and self._settings.tun_engine == "singbox"
+        )
         busy = self._transition_busy or self._connection_phase == "starting"
         self.toggle_btn.setEnabled(has_profiles and not busy)
         self.tun_switch.setEnabled(not busy)
-        self.mode_combo.setEnabled(not busy and not (self._settings.tun_mode and self._settings.tun_engine == "singbox"))
+        self.mode_combo.setEnabled(not busy and self._settings.tun_mode and self._settings.tun_engine == "tun2socks")
         self.proxy_switch.setEnabled(not busy and not self._settings.tun_mode)

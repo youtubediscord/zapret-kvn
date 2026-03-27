@@ -171,6 +171,7 @@ class AppSettings:
     auto_connect_last: bool = True
     start_minimized: bool = False
     enable_system_proxy: bool = True
+    system_proxy_bypass_lan: bool = True
     launch_on_startup: bool = False
     reconnect_on_network_change: bool = True
     socks_port: int = DEFAULT_SOCKS_PORT
@@ -186,6 +187,7 @@ class AppSettings:
     xray_auto_update: bool = False
     tun_mode: bool = False
     tun_engine: str = "singbox"  # "singbox" | "tun2socks"
+    xray_config_file: str = ""
     singbox_path: str = ""
     singbox_config_file: str = ""
     window_width: int = 1000
@@ -206,6 +208,7 @@ class AppSettings:
             "auto_connect_last": self.auto_connect_last,
             "start_minimized": self.start_minimized,
             "enable_system_proxy": self.enable_system_proxy,
+            "system_proxy_bypass_lan": self.system_proxy_bypass_lan,
             "launch_on_startup": self.launch_on_startup,
             "reconnect_on_network_change": self.reconnect_on_network_change,
             "socks_port": self.socks_port,
@@ -221,6 +224,7 @@ class AppSettings:
             "xray_auto_update": self.xray_auto_update,
             "tun_mode": self.tun_mode,
             "tun_engine": self.tun_engine,
+            "xray_config_file": self.xray_config_file,
             "singbox_path": self.singbox_path,
             "singbox_config_file": self.singbox_config_file,
             "window_width": self.window_width,
@@ -243,6 +247,7 @@ class AppSettings:
             auto_connect_last=bool(data.get("auto_connect_last", True)),
             start_minimized=bool(data.get("start_minimized", False)),
             enable_system_proxy=bool(data.get("enable_system_proxy", True)),
+            system_proxy_bypass_lan=bool(data.get("system_proxy_bypass_lan", True)),
             launch_on_startup=bool(data.get("launch_on_startup", False)),
             reconnect_on_network_change=bool(data.get("reconnect_on_network_change", True)),
             socks_port=int(data.get("socks_port") or DEFAULT_SOCKS_PORT),
@@ -258,6 +263,7 @@ class AppSettings:
             xray_auto_update=bool(data.get("xray_auto_update", False)),
             tun_mode=bool(data.get("tun_mode", False)),
             tun_engine=str(data.get("tun_engine") or "singbox"),
+            xray_config_file=str(data.get("xray_config_file") or ""),
             singbox_path=str(data.get("singbox_path") or ""),
             singbox_config_file=str(data.get("singbox_config_file") or ""),
             window_width=int(data.get("window_width") or 1000),

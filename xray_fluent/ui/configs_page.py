@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtGui import QFont
-from PyQt6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QStackedWidget, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -12,35 +12,33 @@ from qfluentwidgets import (
     PlainTextEdit,
     PrimaryPushButton,
     PushButton,
+    SegmentedWidget,
     SubtitleLabel,
 )
 
 
-class SingboxPage(QWidget):
+class _RawConfigEditor(QWidget):
     open_requested = pyqtSignal()
     save_requested = pyqtSignal(str)
     validate_requested = pyqtSignal(str)
     apply_requested = pyqtSignal(str)
 
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(self, title: str, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setObjectName("singbox")
-
+        self._title = title
         self._current_path = ""
         self._saved_text = ""
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 20)
+        root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(12)
-
-        root.addWidget(SubtitleLabel("sing-box", self))
 
         self.file_label = CaptionLabel("Файл: --", self)
         self.file_label.setWordWrap(True)
         root.addWidget(self.file_label)
 
         self.hint_label = CaptionLabel(
-            "Если в конфиге есть outbound tag `proxy`, он будет заменен на выбранный сервер перед запуском.",
+            "Если в конфиге есть outbound tag `proxy`, он будет заменён на выбранный сервер перед запуском.",
             self,
         )
         self.hint_label.setWordWrap(True)
@@ -48,12 +46,10 @@ class SingboxPage(QWidget):
 
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
-
         self.open_btn = PushButton("Открыть", self)
         self.save_btn = PushButton("Сохранить", self)
         self.validate_btn = PushButton("Проверить JSON", self)
         self.apply_btn = PrimaryPushButton("Применить", self)
-
         toolbar.addWidget(self.open_btn)
         toolbar.addWidget(self.save_btn)
         toolbar.addWidget(self.validate_btn)
@@ -62,7 +58,7 @@ class SingboxPage(QWidget):
         root.addLayout(toolbar)
 
         self.editor = PlainTextEdit(self)
-        self.editor.setPlaceholderText("Raw sing-box.json")
+        self.editor.setPlaceholderText(f"Raw {title}.json")
         font = QFont("Consolas", 10)
         font.setStyleHint(QFont.StyleHint.Monospace)
         self.editor.setFont(font)
@@ -91,9 +87,6 @@ class SingboxPage(QWidget):
         self._saved_text = text
         self._refresh_file_label()
 
-    def is_dirty(self) -> bool:
-        return self.editor.toPlainText() != self._saved_text
-
     def set_status(self, level: str, message: str) -> None:
         prefix = {
             "success": "OK",
@@ -111,9 +104,16 @@ class SingboxPage(QWidget):
         self._saved_text = text
         self._refresh_file_label()
 
+    def is_dirty(self) -> bool:
+        return self.editor.toPlainText() != self._saved_text
+
     def _on_open_clicked(self) -> None:
         if self.is_dirty():
-            box = MessageBox("Несохранённые изменения", "Открыть другой файл без сохранения текущих правок?", self.window())
+            box = MessageBox(
+                "Несохранённые изменения",
+                "Открыть другой файл без сохранения текущих правок?",
+                self.window(),
+            )
             box.yesButton.setText("Открыть")
             box.cancelButton.setText("Отмена")
             if not box.exec():
@@ -124,9 +124,74 @@ class SingboxPage(QWidget):
         self._refresh_file_label()
 
     def _refresh_file_label(self) -> None:
-        if self._current_path:
-            label = Path(self._current_path).as_posix()
-        else:
-            label = "--"
+        label = Path(self._current_path).as_posix() if self._current_path else "--"
         suffix = " *" if self.is_dirty() else ""
         self.file_label.setText(f"Файл: {label}{suffix}")
+
+
+class ConfigsPage(QWidget):
+    open_requested = pyqtSignal(str)
+    save_requested = pyqtSignal(str, str)
+    validate_requested = pyqtSignal(str, str)
+    apply_requested = pyqtSignal(str, str)
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("configs")
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(12)
+
+        root.addWidget(SubtitleLabel("Конфиги", self))
+
+        self.segmented = SegmentedWidget(self)
+        root.addWidget(self.segmented)
+        self.segmented.currentItemChanged.connect(self._on_current_core_changed)
+
+        self.stack = QStackedWidget(self)
+        root.addWidget(self.stack, 1)
+
+        self._editors = {
+            "singbox": _RawConfigEditor("sing-box", self),
+            "xray": _RawConfigEditor("xray", self),
+        }
+        self._labels = {
+            "singbox": "sing-box",
+            "xray": "xray",
+        }
+        self._indexes: dict[str, int] = {}
+
+        for index, core in enumerate(("singbox", "xray")):
+            editor = self._editors[core]
+            self._indexes[core] = index
+            self.stack.addWidget(editor)
+            self.segmented.addItem(core, self._labels[core])
+            editor.open_requested.connect(lambda key=core: self.open_requested.emit(key))
+            editor.save_requested.connect(lambda text, key=core: self.save_requested.emit(key, text))
+            editor.validate_requested.connect(lambda text, key=core: self.validate_requested.emit(key, text))
+            editor.apply_requested.connect(lambda text, key=core: self.apply_requested.emit(key, text))
+
+        self.set_current_core("singbox")
+
+    def set_current_core(self, core: str) -> None:
+        if core not in self._editors:
+            return
+        if self.segmented.currentRouteKey() != core:
+            self.segmented.setCurrentItem(core)
+        self.stack.setCurrentIndex(self._indexes[core])
+
+    def _on_current_core_changed(self, core: str) -> None:
+        if core not in self._indexes:
+            return
+        self.stack.setCurrentIndex(self._indexes[core])
+
+    def set_document(self, core: str, path: Path, text: str) -> None:
+        editor = self._editors[core]
+        editor.set_document(path, text)
+
+    def set_status(self, core: str, level: str, message: str) -> None:
+        self._editors[core].set_status(level, message)
+
+    def mark_saved(self, core: str, path: Path | None = None, text: str | None = None) -> None:
+        self._editors[core].mark_saved(path, text)

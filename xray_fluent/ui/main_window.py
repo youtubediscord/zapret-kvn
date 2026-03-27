@@ -27,7 +27,7 @@ from .lock_dialog import PasswordDialog
 from .logs_page import LogsPage
 from .node_edit_dialog import NodeEditDialog
 from .nodes_page import NodesPage
-from .singbox_page import SingboxPage
+from .configs_page import ConfigsPage
 from .settings_page import SettingsPage
 from .about_page import AboutPage
 from .history_page import HistoryPage
@@ -74,7 +74,7 @@ class MainWindow(FluentWindow):
         self.controller = AppController(self)
         self.dashboard_page = DashboardPage(self)
         self.nodes_page = NodesPage(self)
-        self.singbox_page = SingboxPage(self)
+        self.configs_page = ConfigsPage(self)
         self.zapret_page = ZapretPage(self)
         self.logs_page = LogsPage(self)
         self.settings_page = SettingsPage(self)
@@ -89,7 +89,7 @@ class MainWindow(FluentWindow):
 
         loaded = self._load_with_passphrase()
         if loaded:
-            self._load_singbox_editor_document()
+            self._load_config_editor_documents()
 
         unlocked = True
         if loaded and self.controller.state.security.enabled:
@@ -120,7 +120,7 @@ class MainWindow(FluentWindow):
         self.navigationInterface.setExpandWidth(200)
         self.addSubInterface(self.dashboard_page, FIF.SPEED_HIGH, "Панель")
         self.addSubInterface(self.nodes_page, FIF.LINK, "Серверы")
-        self.addSubInterface(self.singbox_page, FIF.CODE, "sing-box")
+        self.addSubInterface(self.configs_page, FIF.CODE, "Конфиги")
         self.addSubInterface(self.zapret_page, FIF.COMMAND_PROMPT, "Zapret")
         self.addSubInterface(self.logs_page, FIF.DOCUMENT, "Логи")
         self.addSubInterface(self.history_page, FIF.HISTORY, "История")
@@ -196,10 +196,10 @@ class MainWindow(FluentWindow):
         self.nodes_page.edit_node_requested.connect(self._on_edit_node)
         self.nodes_page.bulk_edit_requested.connect(self._on_bulk_edit_nodes)
 
-        self.singbox_page.open_requested.connect(self._open_singbox_config)
-        self.singbox_page.save_requested.connect(self._save_singbox_config)
-        self.singbox_page.validate_requested.connect(self._validate_singbox_config)
-        self.singbox_page.apply_requested.connect(self._apply_singbox_config)
+        self.configs_page.open_requested.connect(self._open_core_config)
+        self.configs_page.save_requested.connect(self._save_core_config)
+        self.configs_page.validate_requested.connect(self._validate_core_config)
+        self.configs_page.apply_requested.connect(self._apply_core_config)
 
         self.zapret_page.start_requested.connect(self._on_zapret_start)
         self.zapret_page.stop_requested.connect(self._on_zapret_stop)
@@ -312,6 +312,10 @@ class MainWindow(FluentWindow):
         self.dashboard_page.set_settings_snapshot(settings)
         self._apply_window_geometry(settings)
         self._apply_theme(settings.theme, settings.accent_color)
+        routing_controls_enabled = bool(settings.tun_mode and settings.tun_engine == "tun2socks")
+        for action in (self.tray_mode_global, self.tray_mode_rule, self.tray_mode_direct):
+            if action is not None:
+                action.setEnabled(routing_controls_enabled)
         self._refresh_tray_tooltip()
 
     def _on_ping_updated(self, node_id: str, ping_ms: int | None) -> None:
@@ -526,7 +530,8 @@ class MainWindow(FluentWindow):
         if not payload:
             self._show_status("warning", "Выберите сервер для экспорта")
             return
-        self._save_json_payload(payload, "xray_config.json")
+        suggested_name = "singbox_config.json" if self.controller.is_singbox_editor_mode() else "xray_config.json"
+        self._save_json_payload(payload, suggested_name)
 
     def _save_json_payload(self, payload: str, suggested_name: str) -> None:
         file_path, _ = QFileDialog.getSaveFileName(self, "Экспорт JSON", suggested_name, "JSON files (*.json)")
@@ -541,57 +546,78 @@ class MainWindow(FluentWindow):
             clipboard.setText(payload)
             self._show_status("info", "Экспорт отменён, JSON скопирован в буфер обмена")
 
-    def _load_singbox_editor_document(self) -> None:
-        try:
-            path, text = self.controller.load_active_singbox_config_text()
-        except Exception as exc:
-            self.singbox_page.set_status("error", str(exc))
-            return
-        self.singbox_page.set_document(path, text)
-        self.singbox_page.set_status("info", f"Открыт файл: {path.name}")
+    @staticmethod
+    def _core_title(core: str) -> str:
+        return "sing-box" if core == "singbox" else "xray"
 
-    def _open_singbox_config(self) -> None:
-        base_dir = str(self.controller.get_singbox_config_dir())
-        file_path, _ = QFileDialog.getOpenFileName(self, "Открыть sing-box config", base_dir, "JSON files (*.json)")
+    def _load_config_editor_documents(self) -> None:
+        for core in ("singbox", "xray"):
+            self._load_core_config_document(core)
+
+    def _load_core_config_document(self, core: str) -> None:
+        try:
+            if core == "singbox":
+                path, text = self.controller.load_active_singbox_config_text()
+            else:
+                path, text = self.controller.load_active_xray_config_text()
+        except Exception as exc:
+            self.configs_page.set_status(core, "error", str(exc))
+            return
+        self.configs_page.set_document(core, path, text)
+        self.configs_page.set_status(core, "info", f"Открыт файл: {path.name}")
+
+    def _open_core_config(self, core: str) -> None:
+        title = self._core_title(core)
+        base_dir = str(self.controller.get_singbox_config_dir() if core == "singbox" else self.controller.get_xray_config_dir())
+        file_path, _ = QFileDialog.getOpenFileName(self, f"Открыть {title} config", base_dir, "JSON files (*.json)")
         if not file_path:
             return
         try:
-            path, text = self.controller.load_singbox_config_text(file_path)
+            if core == "singbox":
+                path, text = self.controller.load_singbox_config_text(file_path)
+            else:
+                path, text = self.controller.load_xray_config_text(file_path)
         except Exception as exc:
-            self.singbox_page.set_status("error", str(exc))
+            self.configs_page.set_status(core, "error", str(exc))
             self._show_status("error", str(exc).splitlines()[0])
             return
-        self.singbox_page.set_document(path, text)
-        self.singbox_page.set_status("info", f"Открыт файл: {path.name}")
+        self.configs_page.set_document(core, path, text)
+        self.configs_page.set_status(core, "info", f"Открыт файл: {path.name}")
         self._show_status("success", f"Открыт {path.name}")
 
-    def _save_singbox_config(self, text: str) -> None:
+    def _save_core_config(self, core: str, text: str) -> None:
         try:
-            path = self.controller.save_singbox_config_text(text)
+            if core == "singbox":
+                path = self.controller.save_singbox_config_text(text)
+            else:
+                path = self.controller.save_xray_config_text(text)
         except Exception as exc:
-            self.singbox_page.set_status("error", str(exc))
+            self.configs_page.set_status(core, "error", str(exc))
             self._show_status("error", str(exc).splitlines()[0])
             return
-        self.singbox_page.mark_saved(path, text)
-        self.singbox_page.set_status("success", f"Сохранено: {path.name}")
+        self.configs_page.mark_saved(core, path, text)
+        self.configs_page.set_status(core, "success", f"Сохранено: {path.name}")
         self._show_status("success", f"Сохранено: {path.name}")
 
-    def _validate_singbox_config(self, text: str) -> None:
-        ok, message = self.controller.validate_singbox_json_text(text)
-        self.singbox_page.set_status("success" if ok else "error", message)
+    def _validate_core_config(self, core: str, text: str) -> None:
+        ok, message = self.controller.validate_json_text(text)
+        self.configs_page.set_status(core, "success" if ok else "error", message)
         if ok:
             self._show_status("success", "JSON корректен")
 
-    def _apply_singbox_config(self, text: str) -> None:
-        ok, path, message = self.controller.apply_singbox_config_text(text)
+    def _apply_core_config(self, core: str, text: str) -> None:
+        if core == "singbox":
+            ok, path, message = self.controller.apply_singbox_config_text(text)
+        else:
+            ok, path, message = self.controller.apply_xray_config_text(text)
         if not ok:
-            self.singbox_page.set_status("error", message)
+            self.configs_page.set_status(core, "error", message)
             self._show_status("error", message.splitlines()[0])
             return
         if path is not None:
-            self.singbox_page.mark_saved(path, text)
+            self.configs_page.mark_saved(core, path, text)
         level = "info" if "Применяю" in message else "success"
-        self.singbox_page.set_status(level, message)
+        self.configs_page.set_status(core, level, message)
         self._show_status(level, message.splitlines()[0])
 
     def _on_dashboard_tun_toggled(self, checked: bool) -> None:
@@ -837,6 +863,8 @@ class MainWindow(FluentWindow):
             node_text = node.name
         elif self.controller.is_singbox_editor_mode():
             node_text = self.controller.get_active_singbox_config_name()
+        elif self.controller.is_xray_editor_mode():
+            node_text = self.controller.get_active_xray_config_name()
         else:
             node_text = "Нет сервера"
         self.tray.setToolTip(f"{APP_NAME}\n{status}\n{node_text}")
@@ -927,6 +955,7 @@ class MainWindow(FluentWindow):
 
         try:
             self.controller.import_backup(path, passphrase)
+            self._load_config_editor_documents()
             self._show_status("success", "Резервная копия успешно импортирована")
         except PassphraseRequired:
             self._show_status("error", "Для этой резервной копии требуется пароль")

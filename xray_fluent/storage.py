@@ -10,6 +10,7 @@ from .constants import (
     SINGBOX_PATH_DEFAULT,
     SINGBOX_TEMPLATES_DIR,
     STATE_FILE,
+    XRAY_TEMPLATES_DIR,
     XRAY_PATH_DEFAULT,
 )
 from .models import AppState
@@ -43,6 +44,7 @@ class StateStorage:
     def _ensure_dirs(self) -> None:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         SINGBOX_TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+        XRAY_TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
         RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
         LOG_DIR.mkdir(parents=True, exist_ok=True)
 
