@@ -121,6 +121,12 @@ jobs:
             Copy-Item -Recurse zapret dist/ZapretKVN/zapret
           }
 
+          # Copy raw config templates for first-run users
+          if (Test-Path data/templates) {
+            New-Item -ItemType Directory -Force -Path dist/ZapretKVN/data | Out-Null
+            Copy-Item -Recurse data/templates dist/ZapretKVN/data/templates
+          }
+
           Write-Host "Build complete:"
           Get-ChildItem dist/ZapretKVN/ | Format-Table Name, Length
 

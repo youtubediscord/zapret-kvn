@@ -1,0 +1,56 @@
+{
+  "log": {
+    "level": "warn",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "interface_name": "xftun",
+      "address": [
+        "172.19.0.1/30"
+      ],
+      "auto_route": true,
+      "strict_route": false,
+      "stack": "mixed"
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "proxy"
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    },
+    {
+      "type": "block",
+      "tag": "block"
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "rules": [
+      {
+        "process_name": [
+          "chrome.exe",
+          "firefox.exe",
+          "waterfox.exe",
+          "librewolf.exe",
+          "msedge.exe",
+          "opera.exe",
+          "brave.exe",
+          "vivaldi.exe",
+          "browser.exe",
+          "Discord.exe",
+          "Vesktop.exe",
+          "Spotify.exe"
+        ],
+        "outbound": "proxy"
+      }
+    ],
+    "final": "direct"
+  }
+}

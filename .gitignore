@@ -13,7 +13,9 @@ dist/
 core/
 
 # App data
-data/
+data/*
+!data/templates/
+!data/templates/**
 
 # IDE
 .idea/

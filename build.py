@@ -32,6 +32,7 @@ ZIP_PATH = DIST_DIR / f"{APP_NAME}-portable.zip"
 MANIFEST = ROOT / "uac_admin.manifest"
 CORE_DIR = ROOT / "core"
 ZAPRET_DIR = ROOT / "zapret"
+DATA_TEMPLATES_DIR = ROOT / "data" / "templates"
 
 
 def _print(msg: str) -> None:
@@ -147,6 +148,12 @@ def build_exe() -> None:
     if ZAPRET_DIR.is_dir():
         _print(f"Merging zapret -> {dst_zapret}")
         _copy_tree_merge(ZAPRET_DIR, dst_zapret)
+
+    # Copy tracked raw config templates for first-run users
+    dst_templates = APP_DIR / "data" / "templates"
+    if DATA_TEMPLATES_DIR.is_dir():
+        _print(f"Merging templates -> {dst_templates}")
+        _copy_tree_merge(DATA_TEMPLATES_DIR, dst_templates)
 
     _print(f"Build complete: {APP_DIR / (APP_NAME + '.exe')}")
 
