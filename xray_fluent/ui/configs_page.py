@@ -19,6 +19,7 @@ from qfluentwidgets import (
 
 class _RawConfigEditor(QWidget):
     open_requested = pyqtSignal()
+    reset_requested = pyqtSignal()
     save_requested = pyqtSignal(str)
     validate_requested = pyqtSignal(str)
     apply_requested = pyqtSignal(str)
@@ -44,6 +45,10 @@ class _RawConfigEditor(QWidget):
         self.file_label.setWordWrap(True)
         root.addWidget(self.file_label)
 
+        self.template_label = CaptionLabel("Шаблон: --", self)
+        self.template_label.setWordWrap(True)
+        root.addWidget(self.template_label)
+
         self.hint_label = CaptionLabel(hint_text, self)
         self.hint_label.setWordWrap(True)
         root.addWidget(self.hint_label)
@@ -55,11 +60,13 @@ class _RawConfigEditor(QWidget):
 
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
-        self.open_btn = PushButton("Открыть", self)
+        self.open_btn = PushButton("Импорт шаблона", self)
+        self.reset_btn = PushButton("Сбросить к шаблону", self)
         self.save_btn = PushButton("Сохранить", self)
         self.validate_btn = PushButton("Проверить JSON", self)
         self.apply_btn = PrimaryPushButton("Применить", self)
         toolbar.addWidget(self.open_btn)
+        toolbar.addWidget(self.reset_btn)
         toolbar.addWidget(self.save_btn)
         toolbar.addWidget(self.validate_btn)
         toolbar.addStretch(1)
@@ -82,10 +89,12 @@ class _RawConfigEditor(QWidget):
 
         self.editor.textChanged.connect(self._on_text_changed)
         self.open_btn.clicked.connect(self._on_open_clicked)
+        self.reset_btn.clicked.connect(self._on_reset_clicked)
         self.save_btn.clicked.connect(lambda: self.save_requested.emit(self.editor.toPlainText()))
         self.validate_btn.clicked.connect(lambda: self.validate_requested.emit(self.editor.toPlainText()))
         self.apply_btn.clicked.connect(lambda: self.apply_requested.emit(self.editor.toPlainText()))
 
+        self.set_template_source(None)
         self._refresh_file_label()
 
     def set_document(self, path: Path, text: str) -> None:
@@ -105,6 +114,14 @@ class _RawConfigEditor(QWidget):
         }.get(level.strip().lower(), "Статус")
         self.status_box.setPlainText(f"{prefix}: {message}".strip())
 
+    def set_template_source(self, path: Path | None) -> None:
+        if path is None:
+            self.template_label.setText("Шаблон: --")
+            self.reset_btn.setEnabled(False)
+            return
+        self.template_label.setText(f"Шаблон: {path.as_posix()}")
+        self.reset_btn.setEnabled(True)
+
     def mark_saved(self, path: Path | None = None, text: str | None = None) -> None:
         if path is not None:
             self._current_path = str(path)
@@ -120,14 +137,27 @@ class _RawConfigEditor(QWidget):
         if self.is_dirty():
             box = MessageBox(
                 "Несохранённые изменения",
-                "Открыть другой файл без сохранения текущих правок?",
+                "Импортировать другой шаблон без сохранения текущих правок?",
                 self.window(),
             )
-            box.yesButton.setText("Открыть")
+            box.yesButton.setText("Импортировать")
             box.cancelButton.setText("Отмена")
             if not box.exec():
                 return
         self.open_requested.emit()
+
+    def _on_reset_clicked(self) -> None:
+        if self.is_dirty():
+            box = MessageBox(
+                "Несохранённые изменения",
+                "Сбросить активную копию к шаблону и потерять текущие несохранённые правки?",
+                self.window(),
+            )
+            box.yesButton.setText("Сбросить")
+            box.cancelButton.setText("Отмена")
+            if not box.exec():
+                return
+        self.reset_requested.emit()
 
     def _on_text_changed(self) -> None:
         self._refresh_file_label()
@@ -140,6 +170,7 @@ class _RawConfigEditor(QWidget):
 
 class ConfigsPage(QWidget):
     open_requested = pyqtSignal(str)
+    reset_requested = pyqtSignal(str)
     save_requested = pyqtSignal(str, str)
     validate_requested = pyqtSignal(str, str)
     apply_requested = pyqtSignal(str, str)
@@ -196,6 +227,7 @@ class ConfigsPage(QWidget):
             self.stack.addWidget(editor)
             self.segmented.addItem(core, self._labels[core])
             editor.open_requested.connect(lambda key=core: self.open_requested.emit(key))
+            editor.reset_requested.connect(lambda key=core: self.reset_requested.emit(key))
             editor.save_requested.connect(lambda text, key=core: self.save_requested.emit(key, text))
             editor.validate_requested.connect(lambda text, key=core: self.validate_requested.emit(key, text))
             editor.apply_requested.connect(lambda text, key=core: self.apply_requested.emit(key, text))
@@ -217,6 +249,9 @@ class ConfigsPage(QWidget):
     def set_document(self, core: str, path: Path, text: str) -> None:
         editor = self._editors[core]
         editor.set_document(path, text)
+
+    def set_template_source(self, core: str, path: Path | None) -> None:
+        self._editors[core].set_template_source(path)
 
     def set_status(self, core: str, level: str, message: str) -> None:
         self._editors[core].set_status(level, message)

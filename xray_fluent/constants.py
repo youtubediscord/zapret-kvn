@@ -29,8 +29,11 @@ def get_base_dir() -> Path:
 BASE_DIR = get_base_dir()
 DATA_DIR = BASE_DIR / "data"
 TEMPLATES_DIR = DATA_DIR / "templates"
+CONFIGS_DIR = DATA_DIR / "configs"
 SINGBOX_TEMPLATES_DIR = TEMPLATES_DIR / "sing-box"
 XRAY_TEMPLATES_DIR = TEMPLATES_DIR / "xray"
+SINGBOX_CONFIGS_DIR = CONFIGS_DIR / "sing-box"
+XRAY_CONFIGS_DIR = CONFIGS_DIR / "xray"
 RUNTIME_DIR = DATA_DIR / "runtime"
 LOG_DIR = DATA_DIR / "logs"
 STATE_FILE = DATA_DIR / "state.enc"

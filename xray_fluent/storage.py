@@ -4,12 +4,15 @@ import json
 from pathlib import Path
 
 from .constants import (
+    CONFIGS_DIR,
     DATA_DIR,
     LOG_DIR,
     RUNTIME_DIR,
+    SINGBOX_CONFIGS_DIR,
     SINGBOX_PATH_DEFAULT,
     SINGBOX_TEMPLATES_DIR,
     STATE_FILE,
+    XRAY_CONFIGS_DIR,
     XRAY_TEMPLATES_DIR,
     XRAY_PATH_DEFAULT,
 )
@@ -43,8 +46,11 @@ class StateStorage:
 
     def _ensure_dirs(self) -> None:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
+        CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
         SINGBOX_TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
         XRAY_TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+        SINGBOX_CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
+        XRAY_CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
         RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
         LOG_DIR.mkdir(parents=True, exist_ok=True)
 

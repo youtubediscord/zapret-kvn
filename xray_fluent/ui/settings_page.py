@@ -172,14 +172,6 @@ class SettingsPage(QWidget):
         # ============================================================
         network_group = SettingCardGroup("Сеть", container)
 
-        self.socks_card = _SpinCard(
-            FIF.CONNECT, "Порт SOCKS", "Локальный порт SOCKS5 прокси",
-            parent=network_group,
-        )
-        self.http_card = _SpinCard(
-            FIF.GLOBE, "Порт HTTP", "Локальный порт HTTP прокси",
-            parent=network_group,
-        )
         self.proxy_bypass_lan_card = SwitchSettingCard(
             FIF.HOME, "Обход локальной сети",
             "Не отправлять локальные адреса через системный прокси Windows",
@@ -191,8 +183,6 @@ class SettingsPage(QWidget):
             parent=network_group,
         )
 
-        network_group.addSettingCard(self.socks_card)
-        network_group.addSettingCard(self.http_card)
         network_group.addSettingCard(self.proxy_bypass_lan_card)
         network_group.addSettingCard(self.reconnect_card)
         root.addWidget(network_group)
@@ -375,8 +365,6 @@ class SettingsPage(QWidget):
         # --- Auto-save connections ---
         self.theme_card.combo.currentIndexChanged.connect(self._auto_save)
         self.accent_card.picker.colorChanged.connect(self._auto_save)
-        self.socks_card.spin.valueChanged.connect(self._auto_save)
-        self.http_card.spin.valueChanged.connect(self._auto_save)
         self.proxy_bypass_lan_card.checkedChanged.connect(self._auto_save)
         self.xray_path_card.edit.editingFinished.connect(self._auto_save)
         self.singbox_path_card.edit.editingFinished.connect(self._auto_save)
@@ -406,8 +394,6 @@ class SettingsPage(QWidget):
 
         self._select_combo_data(self.theme_card.combo, settings.theme)
         self.accent_card.picker.setColor(QColor(settings.accent_color or "#0078D4"))
-        self.socks_card.spin.setValue(settings.socks_port)
-        self.http_card.spin.setValue(settings.http_port)
         self.proxy_bypass_lan_card.setChecked(settings.system_proxy_bypass_lan)
         self.xray_path_card.edit.setText(
             normalize_configured_path(
@@ -501,8 +487,6 @@ class SettingsPage(QWidget):
         data = deepcopy(self._settings)
         data.theme = str(self.theme_card.combo.currentData() or "system")
         data.accent_color = self.accent_card.picker.color.name() or "#0078D4"
-        data.socks_port = int(self.socks_card.spin.value())
-        data.http_port = int(self.http_card.spin.value())
         data.system_proxy_bypass_lan = self.proxy_bypass_lan_card.isChecked()
         data.xray_path = normalize_configured_path(
             self.xray_path_card.edit.text(),

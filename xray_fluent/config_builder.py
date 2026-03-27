@@ -6,6 +6,8 @@ from ipaddress import ip_network
 from typing import Any
 
 from .constants import (
+    DEFAULT_HTTP_PORT,
+    DEFAULT_SOCKS_PORT,
     PROXY_HOST,
     ROUTING_DIRECT,
     ROUTING_GLOBAL,
@@ -84,7 +86,15 @@ def _resolve_xray_process_name(rule: dict[str, str]) -> str:
     return value
 
 
-def build_xray_config(node: Node, routing: RoutingSettings, settings: AppSettings, api_port: int = 0) -> dict[str, Any]:
+def build_xray_config(
+    node: Node,
+    routing: RoutingSettings,
+    settings: AppSettings,
+    api_port: int = 0,
+    *,
+    socks_port: int = DEFAULT_SOCKS_PORT,
+    http_port: int = DEFAULT_HTTP_PORT,
+) -> dict[str, Any]:
     if not api_port:
         api_port = DEFAULT_XRAY_STATS_API_PORT
     proxy_outbound = deepcopy(node.outbound)
@@ -182,7 +192,7 @@ def build_xray_config(node: Node, routing: RoutingSettings, settings: AppSetting
             {
                 "tag": "socks-in",
                 "listen": PROXY_HOST,
-                "port": settings.socks_port,
+                "port": int(socks_port),
                 "protocol": "socks",
                 "settings": {
                     "auth": "noauth",
@@ -197,7 +207,7 @@ def build_xray_config(node: Node, routing: RoutingSettings, settings: AppSetting
             {
                 "tag": "http-in",
                 "listen": PROXY_HOST,
-                "port": settings.http_port,
+                "port": int(http_port),
                 "protocol": "http",
                 "settings": {},
                 "sniffing": {

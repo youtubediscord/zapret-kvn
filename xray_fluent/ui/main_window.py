@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QAction, QActionGroup, QCloseEvent, QGuiApplication, QIcon
 from PyQt6.QtWidgets import QApplication, QDialog, QFileDialog, QMenu, QSystemTrayIcon
@@ -197,6 +199,7 @@ class MainWindow(FluentWindow):
         self.nodes_page.bulk_edit_requested.connect(self._on_bulk_edit_nodes)
 
         self.configs_page.open_requested.connect(self._open_core_config)
+        self.configs_page.reset_requested.connect(self._reset_core_config_to_template)
         self.configs_page.save_requested.connect(self._save_core_config)
         self.configs_page.validate_requested.connect(self._validate_core_config)
         self.configs_page.apply_requested.connect(self._apply_core_config)
@@ -564,26 +567,58 @@ class MainWindow(FluentWindow):
             self.configs_page.set_status(core, "error", str(exc))
             return
         self.configs_page.set_document(core, path, text)
-        self.configs_page.set_status(core, "info", f"Открыт файл: {path.name}")
+        template_path = (
+            self.controller.get_active_singbox_template_path()
+            if core == "singbox"
+            else self.controller.get_active_xray_template_path()
+        )
+        self.configs_page.set_template_source(core, template_path)
+        self.configs_page.set_status(core, "info", f"Открыта активная копия: {path.name}")
 
     def _open_core_config(self, core: str) -> None:
         title = self._core_title(core)
-        base_dir = str(self.controller.get_singbox_config_dir() if core == "singbox" else self.controller.get_xray_config_dir())
-        file_path, _ = QFileDialog.getOpenFileName(self, f"Открыть {title} config", base_dir, "JSON files (*.json)")
+        base_dir = str(
+            self.controller.get_singbox_template_dir()
+            if core == "singbox"
+            else self.controller.get_xray_template_dir()
+        )
+        file_path, _ = QFileDialog.getOpenFileName(self, f"Импортировать {title} template", base_dir, "JSON files (*.json)")
         if not file_path:
             return
         try:
             if core == "singbox":
-                path, text = self.controller.load_singbox_config_text(file_path)
+                path, text = self.controller.import_singbox_template(file_path)
+                template_path = self.controller.get_active_singbox_template_path()
             else:
-                path, text = self.controller.load_xray_config_text(file_path)
+                path, text = self.controller.import_xray_template(file_path)
+                template_path = self.controller.get_active_xray_template_path()
         except Exception as exc:
             self.configs_page.set_status(core, "error", str(exc))
             self._show_status("error", str(exc).splitlines()[0])
             return
         self.configs_page.set_document(core, path, text)
-        self.configs_page.set_status(core, "info", f"Открыт файл: {path.name}")
-        self._show_status("success", f"Открыт {path.name}")
+        self.configs_page.set_template_source(core, template_path)
+        self.configs_page.set_status(core, "info", f"Импортирован template. Активная копия: {path.name}")
+        self._show_status("success", f"Импортирован template: {Path(file_path).name}")
+
+    def _reset_core_config_to_template(self, core: str) -> None:
+        if core == "singbox":
+            ok, path, message = self.controller.reset_active_singbox_config_to_template()
+            template_path = self.controller.get_active_singbox_template_path()
+            loader = self.controller.load_active_singbox_config_text
+        else:
+            ok, path, message = self.controller.reset_active_xray_config_to_template()
+            template_path = self.controller.get_active_xray_template_path()
+            loader = self.controller.load_active_xray_config_text
+        if not ok or path is None:
+            self.configs_page.set_status(core, "error", message)
+            self._show_status("error", message.splitlines()[0])
+            return
+        loaded_path, text = loader()
+        self.configs_page.set_document(core, loaded_path, text)
+        self.configs_page.set_template_source(core, template_path)
+        self.configs_page.set_status(core, "success", message)
+        self._show_status("success", message)
 
     def _save_core_config(self, core: str, text: str) -> None:
         try:
@@ -768,9 +803,10 @@ class MainWindow(FluentWindow):
         # Use proxy if connected
         proxy_url = None
         if self.controller.connected:
-            from ..constants import PROXY_HOST, DEFAULT_HTTP_PORT
-            port = self.controller.state.settings.http_port or DEFAULT_HTTP_PORT
-            proxy_url = f"http://{PROXY_HOST}:{port}"
+            from ..constants import PROXY_HOST
+            port = self.controller.get_effective_http_proxy_port()
+            if port:
+                proxy_url = f"http://{PROXY_HOST}:{port}"
 
         restart_in_tray = self._tray_available and not self.isVisible()
 

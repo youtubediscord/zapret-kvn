@@ -34,8 +34,10 @@ from .constants import (
     PROXY_HOST,
     ROUTING_MODES,
     SINGBOX_CLASH_API_PORT,
+    SINGBOX_CONFIGS_DIR,
     SINGBOX_DEFAULT_CONFIG_NAME,
     SINGBOX_TEMPLATES_DIR,
+    XRAY_CONFIGS_DIR,
     XRAY_DEFAULT_CONFIG_NAME,
     XRAY_TUN_DEFAULT_INTERFACE_NAME,
     XRAY_TEMPLATES_DIR,
@@ -347,10 +349,18 @@ class AppController(QObject):
         return bool(settings.system_proxy_bypass_lan)
 
     def get_singbox_config_dir(self) -> Path:
+        SINGBOX_CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
+        return SINGBOX_CONFIGS_DIR
+
+    def get_xray_config_dir(self) -> Path:
+        XRAY_CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
+        return XRAY_CONFIGS_DIR
+
+    def get_singbox_template_dir(self) -> Path:
         SINGBOX_TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
         return SINGBOX_TEMPLATES_DIR
 
-    def get_xray_config_dir(self) -> Path:
+    def get_xray_template_dir(self) -> Path:
         XRAY_TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
         return XRAY_TEMPLATES_DIR
 
@@ -364,6 +374,9 @@ class AppController(QObject):
         if not relative.suffix:
             relative = relative.with_suffix(".json")
         return relative.as_posix()
+
+    def _normalize_singbox_template_relative_path(self, value: str | Path | None) -> str:
+        return self._normalize_singbox_config_relative_path(value)
 
     def _resolve_singbox_config_path(self, path: str | Path | None = None) -> Path:
         base_dir = self.get_singbox_config_dir().resolve()
@@ -383,7 +396,29 @@ class AppController(QObject):
         try:
             resolved.relative_to(base_dir)
         except ValueError as exc:
-            raise ValueError("Файл sing-box должен находиться в data/templates/sing-box/") from exc
+            raise ValueError("Файл sing-box должен находиться в data/configs/sing-box/") from exc
+
+        return resolved
+
+    def _resolve_singbox_template_path(self, path: str | Path | None = None) -> Path:
+        base_dir = self.get_singbox_template_dir().resolve()
+        if path is None or not str(path).strip():
+            relative = Path(self._normalize_singbox_template_relative_path(self.state.settings.singbox_template_file))
+            resolved = (base_dir / relative).resolve()
+        else:
+            candidate = Path(path)
+            if candidate.is_absolute():
+                resolved = candidate.resolve()
+            else:
+                resolved = (base_dir / self._normalize_singbox_template_relative_path(candidate)).resolve()
+
+        if not resolved.suffix:
+            resolved = resolved.with_suffix(".json")
+
+        try:
+            resolved.relative_to(base_dir)
+        except ValueError as exc:
+            raise ValueError("Файл sing-box template должен находиться в data/templates/sing-box/") from exc
 
         return resolved
 
@@ -397,6 +432,9 @@ class AppController(QObject):
         if not relative.suffix:
             relative = relative.with_suffix(".json")
         return relative.as_posix()
+
+    def _normalize_xray_template_relative_path(self, value: str | Path | None) -> str:
+        return self._normalize_xray_config_relative_path(value)
 
     def _resolve_xray_config_path(self, path: str | Path | None = None) -> Path:
         base_dir = self.get_xray_config_dir().resolve()
@@ -416,7 +454,29 @@ class AppController(QObject):
         try:
             resolved.relative_to(base_dir)
         except ValueError as exc:
-            raise ValueError("Файл xray должен находиться в data/templates/xray/") from exc
+            raise ValueError("Файл xray должен находиться в data/configs/xray/") from exc
+
+        return resolved
+
+    def _resolve_xray_template_path(self, path: str | Path | None = None) -> Path:
+        base_dir = self.get_xray_template_dir().resolve()
+        if path is None or not str(path).strip():
+            relative = Path(self._normalize_xray_template_relative_path(self.state.settings.xray_template_file))
+            resolved = (base_dir / relative).resolve()
+        else:
+            candidate = Path(path)
+            if candidate.is_absolute():
+                resolved = candidate.resolve()
+            else:
+                resolved = (base_dir / self._normalize_xray_template_relative_path(candidate)).resolve()
+
+        if not resolved.suffix:
+            resolved = resolved.with_suffix(".json")
+
+        try:
+            resolved.relative_to(base_dir)
+        except ValueError as exc:
+            raise ValueError("Файл xray template должен находиться в data/templates/xray/") from exc
 
         return resolved
 
@@ -431,12 +491,34 @@ class AppController(QObject):
         self.schedule_save()
         return resolved
 
+    def _set_active_singbox_template_path(self, path: Path, *, emit_signal: bool = True) -> Path:
+        resolved = self._resolve_singbox_template_path(path)
+        relative = resolved.relative_to(self.get_singbox_template_dir().resolve()).as_posix()
+        if self.state.settings.singbox_template_file == relative:
+            return resolved
+        self.state.settings.singbox_template_file = relative
+        if emit_signal:
+            self.settings_changed.emit(self.state.settings)
+        self.schedule_save()
+        return resolved
+
     def _set_active_xray_config_path(self, path: Path, *, emit_signal: bool = True) -> Path:
         resolved = self._resolve_xray_config_path(path)
         relative = resolved.relative_to(self.get_xray_config_dir().resolve()).as_posix()
         if self.state.settings.xray_config_file == relative:
             return resolved
         self.state.settings.xray_config_file = relative
+        if emit_signal:
+            self.settings_changed.emit(self.state.settings)
+        self.schedule_save()
+        return resolved
+
+    def _set_active_xray_template_path(self, path: Path, *, emit_signal: bool = True) -> Path:
+        resolved = self._resolve_xray_template_path(path)
+        relative = resolved.relative_to(self.get_xray_template_dir().resolve()).as_posix()
+        if self.state.settings.xray_template_file == relative:
+            return resolved
+        self.state.settings.xray_template_file = relative
         if emit_signal:
             self.settings_changed.emit(self.state.settings)
         self.schedule_save()
@@ -581,11 +663,51 @@ class AppController(QObject):
     def get_active_singbox_config_name(self) -> str:
         return self.get_active_singbox_config_path().name
 
+    def get_active_singbox_template_path(self) -> Path | None:
+        relative = self._normalize_singbox_template_relative_path(
+            self.state.settings.singbox_template_file or self.state.settings.singbox_config_file
+        )
+        try:
+            resolved = self._resolve_singbox_template_path(relative)
+        except ValueError:
+            return None
+        return resolved if resolved.exists() else None
+
     def get_active_xray_config_path(self) -> Path:
         return self._resolve_xray_config_path()
 
     def get_active_xray_config_name(self) -> str:
         return self.get_active_xray_config_path().name
+
+    def get_active_xray_template_path(self) -> Path | None:
+        relative = self._normalize_xray_template_relative_path(
+            self.state.settings.xray_template_file or self.state.settings.xray_config_file
+        )
+        try:
+            resolved = self._resolve_xray_template_path(relative)
+        except ValueError:
+            return None
+        return resolved if resolved.exists() else None
+
+    def get_effective_proxy_ports(self) -> tuple[int, int]:
+        session = self._active_session
+        if session is not None and session.socks_port > 0 and session.http_port > 0:
+            return session.socks_port, session.http_port
+        try:
+            _, _, _, socks_port, http_port, _ = self._inspect_active_xray_config()
+        except Exception:
+            socks_port = 0
+            http_port = 0
+        if socks_port > 0 and http_port > 0:
+            return socks_port, http_port
+        return DEFAULT_SOCKS_PORT, DEFAULT_HTTP_PORT
+
+    def get_effective_http_proxy_port(self) -> int | None:
+        session = self._active_session
+        if session is not None and session.tun_mode:
+            return None
+        _, http_port = self.get_effective_proxy_ports()
+        return http_port if http_port > 0 else None
 
     def _cache_singbox_document_state(self, path: Path, text: str) -> SingboxDocumentState:
         state = inspect_singbox_document_text(path, text)
@@ -599,11 +721,28 @@ class AppController(QObject):
         text = path.read_text(encoding="utf-8")
         return self._cache_singbox_document_state(path, text)
 
+    def _default_singbox_template_path_for_config(self, config_path: Path) -> Path | None:
+        relative = config_path.relative_to(self.get_singbox_config_dir().resolve()).as_posix()
+        template = self._resolve_singbox_template_path(relative)
+        return template if template.exists() else None
+
+    def _default_xray_template_path_for_config(self, config_path: Path) -> Path | None:
+        relative = config_path.relative_to(self.get_xray_config_dir().resolve()).as_posix()
+        template = self._resolve_xray_template_path(relative)
+        return template if template.exists() else None
+
     def _ensure_active_singbox_config(self, path: str | Path | None = None) -> Path:
         resolved = self._resolve_singbox_config_path(path)
         resolved.parent.mkdir(parents=True, exist_ok=True)
         if not resolved.exists():
-            resolved.write_text(self._default_singbox_config_text(), encoding="utf-8")
+            template_path = self.get_active_singbox_template_path()
+            if template_path is None and path is not None:
+                template_path = self._default_singbox_template_path_for_config(resolved)
+            if template_path is not None:
+                resolved.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
+                self._set_active_singbox_template_path(template_path, emit_signal=False)
+            else:
+                resolved.write_text(self._default_singbox_config_text(), encoding="utf-8")
         self._set_active_singbox_config_path(resolved)
         return resolved
 
@@ -611,7 +750,14 @@ class AppController(QObject):
         resolved = self._resolve_xray_config_path(path)
         resolved.parent.mkdir(parents=True, exist_ok=True)
         if not resolved.exists():
-            resolved.write_text(self._default_xray_config_text(), encoding="utf-8")
+            template_path = self.get_active_xray_template_path()
+            if template_path is None and path is not None:
+                template_path = self._default_xray_template_path_for_config(resolved)
+            if template_path is not None:
+                resolved.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
+                self._set_active_xray_template_path(template_path, emit_signal=False)
+            else:
+                resolved.write_text(self._default_xray_config_text(), encoding="utf-8")
         self._set_active_xray_config_path(resolved)
         return resolved
 
@@ -640,6 +786,53 @@ class AppController(QObject):
             raise FileNotFoundError(f"Файл не найден: {resolved.name}")
         self._set_active_xray_config_path(resolved)
         return resolved, resolved.read_text(encoding="utf-8")
+
+    def import_singbox_template(self, path: str | Path) -> tuple[Path, str]:
+        template_path = self._resolve_singbox_template_path(path)
+        if not template_path.exists():
+            raise FileNotFoundError(f"Файл не найден: {template_path.name}")
+        relative = template_path.relative_to(self.get_singbox_template_dir().resolve()).as_posix()
+        active_path = self._resolve_singbox_config_path(relative)
+        active_path.parent.mkdir(parents=True, exist_ok=True)
+        if not active_path.exists():
+            active_path.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
+        self._set_active_singbox_template_path(template_path)
+        self._set_active_singbox_config_path(active_path)
+        text = active_path.read_text(encoding="utf-8")
+        self._cache_singbox_document_state(active_path, text)
+        return active_path, text
+
+    def import_xray_template(self, path: str | Path) -> tuple[Path, str]:
+        template_path = self._resolve_xray_template_path(path)
+        if not template_path.exists():
+            raise FileNotFoundError(f"Файл не найден: {template_path.name}")
+        relative = template_path.relative_to(self.get_xray_template_dir().resolve()).as_posix()
+        active_path = self._resolve_xray_config_path(relative)
+        active_path.parent.mkdir(parents=True, exist_ok=True)
+        if not active_path.exists():
+            active_path.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
+        self._set_active_xray_template_path(template_path)
+        self._set_active_xray_config_path(active_path)
+        return active_path, active_path.read_text(encoding="utf-8")
+
+    def reset_active_singbox_config_to_template(self) -> tuple[bool, Path | None, str]:
+        template_path = self.get_active_singbox_template_path()
+        if template_path is None:
+            return False, None, "Для текущего sing-box конфига не привязан template."
+        active_path = self._ensure_active_singbox_config()
+        text = template_path.read_text(encoding="utf-8")
+        active_path.write_text(text, encoding="utf-8")
+        self._cache_singbox_document_state(active_path, text)
+        return True, active_path, f"Активная копия сброшена к шаблону: {template_path.name}"
+
+    def reset_active_xray_config_to_template(self) -> tuple[bool, Path | None, str]:
+        template_path = self.get_active_xray_template_path()
+        if template_path is None:
+            return False, None, "Для текущего xray конфига не привязан template."
+        active_path = self._ensure_active_xray_config()
+        text = template_path.read_text(encoding="utf-8")
+        active_path.write_text(text, encoding="utf-8")
+        return True, active_path, f"Активная копия сброшена к шаблону: {template_path.name}"
 
     def save_singbox_config_text(self, text: str, path: str | Path | None = None) -> Path:
         resolved = self._ensure_active_singbox_config(path)
@@ -1246,8 +1439,8 @@ class AppController(QObject):
                 "tun_engine": str(settings.tun_engine),
                 "proxy_enabled": bool(settings.enable_system_proxy),
                 "proxy_bypass_lan": bool(routing.bypass_lan),
-                "socks_port": int(settings.socks_port),
-                "http_port": int(settings.http_port),
+                "socks_port": int(DEFAULT_SOCKS_PORT),
+                "http_port": int(DEFAULT_HTTP_PORT),
                 "xray_path": str(settings.xray_path),
                 "singbox_path": str(settings.singbox_path),
                 "routing": routing.to_dict(),
@@ -1285,8 +1478,8 @@ class AppController(QObject):
                 "node_id": node.id if node else None,
                 "tun_mode": bool(settings.tun_mode),
                 "tun_engine": str(settings.tun_engine),
-                "socks_port": int(settings.socks_port),
-                "http_port": int(settings.http_port),
+                "socks_port": int(DEFAULT_SOCKS_PORT),
+                "http_port": int(DEFAULT_HTTP_PORT),
                 "xray_path": str(settings.xray_path),
                 "routing": routing.to_dict(),
             }
@@ -1310,7 +1503,7 @@ class AppController(QObject):
                 {
                     "mode": "tun2socks",
                     "server": node.server if node else "",
-                    "socks_port": int(settings.socks_port),
+                    "socks_port": int(DEFAULT_SOCKS_PORT),
                 }
             )
         if self.is_xray_tun_mode(settings):
@@ -1351,9 +1544,9 @@ class AppController(QObject):
         settings = self.state.settings
         routing = self.state.routing
         if socks_port is None:
-            socks_port = int(settings.socks_port)
+            socks_port = int(DEFAULT_SOCKS_PORT)
         if http_port is None:
-            http_port = int(settings.http_port)
+            http_port = int(DEFAULT_HTTP_PORT)
         if xray_inbound_tags is None:
             xray_inbound_tags = ()
         if not ping_host and node is not None:
@@ -1394,8 +1587,11 @@ class AppController(QObject):
     def _apply_proxy_runtime_change(self) -> bool:
         settings = self.state.settings
         bypass_lan = self._system_proxy_bypass_lan()
-        socks_port = self._active_session.socks_port if self._active_session else settings.socks_port
-        http_port = self._active_session.http_port if self._active_session else settings.http_port
+        if self._active_session is not None:
+            socks_port = self._active_session.socks_port
+            http_port = self._active_session.http_port
+        else:
+            socks_port, http_port = self.get_effective_proxy_ports()
         try:
             if settings.enable_system_proxy:
                 self.proxy.enable(
@@ -1684,7 +1880,13 @@ class AppController(QObject):
                 return json.dumps(runtime.config, ensure_ascii=True, indent=2)
             if not node:
                 return None
-            cfg = build_xray_config(node, self.state.routing, self.state.settings)
+            cfg = build_xray_config(
+                node,
+                self.state.routing,
+                self.state.settings,
+                socks_port=DEFAULT_SOCKS_PORT,
+                http_port=DEFAULT_HTTP_PORT,
+            )
             return json.dumps(cfg, ensure_ascii=True, indent=2)
         except ValueError:
             return None
@@ -1977,7 +2179,7 @@ class AppController(QObject):
             if legacy_tun2socks_mode:
                 try:
                     self._xray_api_port = _find_free_api_port(
-                        excluded={self.state.settings.socks_port, self.state.settings.http_port},
+                        excluded={DEFAULT_SOCKS_PORT, DEFAULT_HTTP_PORT},
                     )
                 except RuntimeError:
                     self._set_connection_status("error", "Не удалось найти свободный порт для API Xray", level="error")
@@ -2096,7 +2298,14 @@ class AppController(QObject):
                 elif engine == "tun2socks":
                     # --- legacy tun2socks TUN path ---
                     self._active_core = "tun2socks"
-                    config = build_xray_config(node, self.state.routing, self.state.settings, api_port=self._xray_api_port)
+                    config = build_xray_config(
+                        node,
+                        self.state.routing,
+                        self.state.settings,
+                        api_port=self._xray_api_port,
+                        socks_port=DEFAULT_SOCKS_PORT,
+                        http_port=DEFAULT_HTTP_PORT,
+                    )
                     config["log"] = {"loglevel": "error"}
                     xray_ok = self.xray.start(self.state.settings.xray_path, config)
                     if not xray_ok:
@@ -2105,7 +2314,7 @@ class AppController(QObject):
                         return False
                     self._set_connection_status("starting", "Xray запущен. Создание TUN адаптера...", level="info")
 
-                    socks_port = self.state.settings.socks_port
+                    socks_port = DEFAULT_SOCKS_PORT
                     self._log(f"[tun] starting tun2socks -> SOCKS 127.0.0.1:{socks_port}")
                     tun_ok = self.tun2socks.start(socks_port, server_ip=node.server)
                     self._log(f"[tun] tun2socks start result: {tun_ok}")
@@ -2384,10 +2593,6 @@ class AppController(QObject):
         old_launch = old_settings.launch_on_startup
         old_tun = old_settings.tun_mode
         old_tun_engine = old_settings.tun_engine
-        ports_changed = (
-            old_settings.socks_port != settings.socks_port
-            or old_settings.http_port != settings.http_port
-        )
         self.state.settings = settings
         self.settings_changed.emit(self.state.settings)
         self.schedule_save()
@@ -2406,10 +2611,6 @@ class AppController(QObject):
             if settings.tun_mode and old_tun_engine != settings.tun_engine:
                 self._desired_connected = True
                 self._request_transition("TUN engine changed")
-                return
-            if ports_changed and settings.tun_mode and settings.tun_engine == "tun2socks":
-                self._desired_connected = True
-                self._request_transition("proxy ports changed")
                 return
             self._request_transition("settings changed")
 
@@ -2495,14 +2696,7 @@ class AppController(QObject):
             self.status.emit("info", "Тест подключения уже выполняется")
             return
 
-        http_port = self.state.settings.http_port
-        if not self.state.settings.tun_mode:
-            if self._active_session is not None and self._active_session.http_port > 0:
-                http_port = self._active_session.http_port
-            else:
-                _, _, _, _, inspected_http_port, _ = self._inspect_active_xray_config()
-                if inspected_http_port > 0:
-                    http_port = inspected_http_port
+        http_port = self.get_effective_http_proxy_port() or DEFAULT_HTTP_PORT
 
         self._connectivity_worker = ConnectivityTestWorker(
             http_port, target, tun_mode=self.state.settings.tun_mode,
@@ -2561,8 +2755,7 @@ class AppController(QObject):
             mode = "xray-tun"
         else:
             mode = "xray"
-        socks_port = self._active_session.socks_port if self._active_session else self.state.settings.socks_port
-        http_port = self._active_session.http_port if self._active_session else self.state.settings.http_port
+        socks_port, http_port = self.get_effective_proxy_ports()
         inbound_tags = self._active_session.xray_inbound_tags if self._active_session else ()
         self._metrics_worker = LiveMetricsWorker(
             self.state.settings.xray_path,
@@ -2976,7 +3169,14 @@ class AppController(QObject):
                 self._log(f"[hot-swap] {reason} — restarting xray only, tun2socks stays up")
                 self._set_connection_status("starting", f"Переключение на {node.name}...", level="info")
                 self.xray.stop()
-                config = build_xray_config(node, self.state.routing, self.state.settings, api_port=self._xray_api_port)
+                config = build_xray_config(
+                    node,
+                    self.state.routing,
+                    self.state.settings,
+                    api_port=self._xray_api_port,
+                    socks_port=DEFAULT_SOCKS_PORT,
+                    http_port=DEFAULT_HTTP_PORT,
+                )
                 config["log"] = {"loglevel": "error"}
                 ok = self.xray.start(self.state.settings.xray_path, config)
                 if ok:

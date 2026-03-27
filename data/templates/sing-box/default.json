@@ -23,7 +23,8 @@
     },
     {
       "type": "direct",
-      "tag": "direct"
+      "tag": "direct",
+      "domain_resolver": "bootstrap-dns"
     },
     {
       "type": "block",
@@ -32,7 +33,15 @@
   ],
   "route": {
     "auto_detect_interface": true,
+    "default_domain_resolver": "proxy-dns",
     "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "protocol": "dns",
+        "action": "hijack-dns"
+      },
       {
         "domain": [
           "ntc.party",
@@ -59,9 +68,25 @@
           "Vesktop.exe",
           "Spotify.exe"
         ],
-        "outbound": "proxy"
+        "outbound": "direct"
       }
     ],
     "final": "direct"
+  },
+  "dns": {
+    "servers": [
+      {
+        "tag": "bootstrap-dns",
+        "type": "udp",
+        "server": "1.1.1.1"
+      },
+      {
+        "tag": "proxy-dns",
+        "type": "tcp",
+        "server": "8.8.8.8",
+        "detour": "proxy"
+      }
+    ],
+    "final": "proxy-dns"
   }
 }

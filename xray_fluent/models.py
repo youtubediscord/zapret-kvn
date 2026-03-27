@@ -5,12 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 import uuid
 
-from .constants import (
-    DEFAULT_HTTP_PORT,
-    DEFAULT_SOCKS_PORT,
-    ROUTING_RULE,
-    STATE_SCHEMA_VERSION,
-)
+from .constants import ROUTING_RULE, STATE_SCHEMA_VERSION
 
 
 def utc_now_iso() -> str:
@@ -174,8 +169,6 @@ class AppSettings:
     system_proxy_bypass_lan: bool = True
     launch_on_startup: bool = False
     reconnect_on_network_change: bool = True
-    socks_port: int = DEFAULT_SOCKS_PORT
-    http_port: int = DEFAULT_HTTP_PORT
     xray_path: str = ""
     log_level: str = "warning"
     check_updates: bool = True
@@ -188,8 +181,10 @@ class AppSettings:
     tun_mode: bool = False
     tun_engine: str = "singbox"  # "singbox" | "xray" | legacy "tun2socks"
     xray_config_file: str = ""
+    xray_template_file: str = ""
     singbox_path: str = ""
     singbox_config_file: str = ""
+    singbox_template_file: str = ""
     window_width: int = 1000
     window_height: int = 720
     window_x: int = -1
@@ -211,8 +206,6 @@ class AppSettings:
             "system_proxy_bypass_lan": self.system_proxy_bypass_lan,
             "launch_on_startup": self.launch_on_startup,
             "reconnect_on_network_change": self.reconnect_on_network_change,
-            "socks_port": self.socks_port,
-            "http_port": self.http_port,
             "xray_path": self.xray_path,
             "log_level": self.log_level,
             "check_updates": self.check_updates,
@@ -225,8 +218,10 @@ class AppSettings:
             "tun_mode": self.tun_mode,
             "tun_engine": self.tun_engine,
             "xray_config_file": self.xray_config_file,
+            "xray_template_file": self.xray_template_file,
             "singbox_path": self.singbox_path,
             "singbox_config_file": self.singbox_config_file,
+            "singbox_template_file": self.singbox_template_file,
             "window_width": self.window_width,
             "window_height": self.window_height,
             "window_x": self.window_x,
@@ -250,8 +245,6 @@ class AppSettings:
             system_proxy_bypass_lan=bool(data.get("system_proxy_bypass_lan", True)),
             launch_on_startup=bool(data.get("launch_on_startup", False)),
             reconnect_on_network_change=bool(data.get("reconnect_on_network_change", True)),
-            socks_port=int(data.get("socks_port") or DEFAULT_SOCKS_PORT),
-            http_port=int(data.get("http_port") or DEFAULT_HTTP_PORT),
             xray_path=str(data.get("xray_path") or ""),
             log_level=str(data.get("log_level") or "warning"),
             check_updates=bool(data.get("check_updates", True)),
@@ -264,8 +257,10 @@ class AppSettings:
             tun_mode=bool(data.get("tun_mode", False)),
             tun_engine=str(data.get("tun_engine") or "singbox"),
             xray_config_file=str(data.get("xray_config_file") or ""),
+            xray_template_file=str(data.get("xray_template_file") or ""),
             singbox_path=str(data.get("singbox_path") or ""),
             singbox_config_file=str(data.get("singbox_config_file") or ""),
+            singbox_template_file=str(data.get("singbox_template_file") or ""),
             window_width=int(data.get("window_width") or 1000),
             window_height=int(data.get("window_height") or 720),
             window_x=int(data.get("window_x", -1)),
