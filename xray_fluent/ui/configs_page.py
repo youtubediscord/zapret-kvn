@@ -23,7 +23,14 @@ class _RawConfigEditor(QWidget):
     validate_requested = pyqtSignal(str)
     apply_requested = pyqtSignal(str)
 
-    def __init__(self, title: str, parent: QWidget | None = None):
+    def __init__(
+        self,
+        title: str,
+        *,
+        hint_text: str,
+        detail_hint_text: str = "",
+        parent: QWidget | None = None,
+    ):
         super().__init__(parent)
         self._title = title
         self._current_path = ""
@@ -37,12 +44,14 @@ class _RawConfigEditor(QWidget):
         self.file_label.setWordWrap(True)
         root.addWidget(self.file_label)
 
-        self.hint_label = CaptionLabel(
-            "Если в конфиге есть outbound tag `proxy`, он будет заменён на выбранный сервер перед запуском.",
-            self,
-        )
+        self.hint_label = CaptionLabel(hint_text, self)
         self.hint_label.setWordWrap(True)
         root.addWidget(self.hint_label)
+
+        self.detail_hint_label = CaptionLabel(detail_hint_text, self)
+        self.detail_hint_label.setWordWrap(True)
+        self.detail_hint_label.setVisible(bool(detail_hint_text.strip()))
+        root.addWidget(self.detail_hint_label)
 
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
@@ -153,8 +162,27 @@ class ConfigsPage(QWidget):
         root.addWidget(self.stack, 1)
 
         self._editors = {
-            "singbox": _RawConfigEditor("sing-box", self),
-            "xray": _RawConfigEditor("xray", self),
+            "singbox": _RawConfigEditor(
+                "sing-box",
+                hint_text="Если в конфиге есть outbound tag `proxy`, он будет заменён на выбранный сервер перед запуском.",
+                detail_hint_text=(
+                    "В режиме sing-box TUN правила процесса и пути применяются к перехваченному системному трафику. "
+                    "Если выбранный сервер нельзя запустить нативным sing-box outbound, приложение автоматически "
+                    "оставит этот же raw sing-box.json базой и поднимет local xray sidecar только для proxy path."
+                ),
+                parent=self,
+            ),
+            "xray": _RawConfigEditor(
+                "xray",
+                hint_text="Если в конфиге есть outbound tag `proxy`, он будет заменён на выбранный сервер перед запуском.",
+                detail_hint_text=(
+                    "Direct xray mode использует тот же raw xray.json только для трафика, который уже вошёл в xray "
+                    "через системный прокси Windows или ручную proxy-настройку приложения. "
+                    "xray TUN mode использует этот же raw xray.json как true TUN path, поэтому process/path rules "
+                    "из xray routing начинают работать на системный трафик."
+                ),
+                parent=self,
+            ),
         }
         self._labels = {
             "singbox": "sing-box",

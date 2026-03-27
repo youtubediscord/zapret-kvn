@@ -571,15 +571,33 @@ class DashboardPage(QWidget):
     def _refresh_routing_card(self) -> None:
         if not self._settings.tun_mode:
             self.routing_mode_label.setText("Routing из raw xray config")
-            self.routing_dns_label.setText("DNS берётся из editor JSON")
-            self.routing_rules_label.setText("GUI routing не влияет на direct xray launch")
-            self.routing_bypass_label.setText("Эти настройки используются только для tun2socks helper-path")
+            self.routing_dns_label.setText("DNS и routing берутся из editor JSON")
+            self.routing_rules_label.setText("Правила xray работают только для трафика, уже вошедшего в xray inbound")
+            if self._settings.enable_system_proxy:
+                self.routing_bypass_label.setText("Сейчас это обычно трафик приложений, которые используют системный прокси Windows")
+            else:
+                self.routing_bypass_label.setText("Сист. прокси выключен: трафик попадёт в xray только из приложений с ручной proxy-настройкой")
+            return
+        if self._is_xray_tun_mode():
+            self.routing_mode_label.setText("Routing из raw xray config")
+            self.routing_dns_label.setText("xray TUN подаёт системный трафик прямо в xray, системный прокси Windows здесь не используется")
+            self.routing_rules_label.setText(
+                "Process/path rules из raw xray routing начинают работать на системный трафик; GUI routing не влияет на xray TUN"
+            )
+            self.routing_bypass_label.setText(
+                "Режим experimental: live traffic totals работают, но process traffic telemetry остаётся скромнее, чем у sing-box TUN"
+            )
             return
         if self._settings.tun_mode and self._settings.tun_engine == "singbox":
             self.routing_mode_label.setText("Routing из raw sing-box config")
-            self.routing_dns_label.setText("DNS берётся из editor JSON")
-            self.routing_rules_label.setText("GUI routing не влияет на sing-box")
-            self.routing_bypass_label.setText("Эти настройки используются только для tun2socks helper-path")
+            self.routing_dns_label.setText("DNS и routing берутся из editor JSON")
+            self.routing_rules_label.setText(
+                "sing-box TUN перехватывает системный трафик, поэтому process/path rules работают полноценно"
+            )
+            self.routing_bypass_label.setText(
+                "GUI routing не влияет на sing-box. Unsupported node transports вроде xhttp будут автоматически "
+                "обслужены через local xray sidecar внутри этого же режима."
+            )
             return
         self.routing_mode_label.setText(_mode_title(self._routing.mode))
         self.routing_dns_label.setText(f"DNS: {self._routing.dns_mode.title()}")
@@ -685,13 +703,24 @@ class DashboardPage(QWidget):
     def _effective_latency(self) -> int | None:
         return self._live_rtt_ms if self._live_rtt_ms is not None else self._selected_latency_ms
 
+    def _is_xray_tun_mode(self) -> bool:
+        return bool(self._settings.tun_mode and self._settings.tun_engine == "xray")
+
+    def _is_legacy_tun2socks_mode(self) -> bool:
+        return bool(self._settings.tun_mode and self._settings.tun_engine == "tun2socks")
+
     def _route_engine_label(self) -> str:
         if self._settings.tun_mode:
-            return "Режим VPN (TUN)"
+            if self._settings.tun_engine == "singbox":
+                return "VPN (TUN) -> sing-box (recommended, auto hybrid)"
+            if self._is_xray_tun_mode():
+                config_name = Path(self._settings.xray_config_file or "default.json").name
+                return f"VPN (TUN) -> xray (experimental) · raw xray config: {config_name}"
+            return "VPN (TUN) -> tun2socks (legacy)"
         config_name = Path(self._settings.xray_config_file or "default.json").name
         if self._settings.enable_system_proxy:
-            return f"Системный прокси  xray config: {config_name}"
-        return f"Локальный прокси  xray config: {config_name}"
+            return f"Системный прокси Windows -> xray config: {config_name}"
+        return f"Локальный xray proxy  xray config: {config_name} (только вручную настроенные приложения)"
 
     def _default_connection_message(self) -> str:
         action = "VPN" if self._settings.tun_mode else "Прокси"
@@ -723,7 +752,7 @@ class DashboardPage(QWidget):
         if self._selected_node is None:
             if self._settings.tun_mode and self._settings.tun_engine == "singbox":
                 return self._singbox_editor_summary()
-            if not self._settings.tun_mode:
+            if not self._settings.tun_mode or self._is_xray_tun_mode():
                 return self._xray_editor_summary()
             return "Активный профиль не выбран"
         group = self._selected_node.group or "По умолчанию"
@@ -742,13 +771,17 @@ class DashboardPage(QWidget):
                     if not self._connected
                     else f"Активный сеанс: {self._singbox_editor_summary()}"
                 )
-            if not self._settings.tun_mode:
+            if not self._settings.tun_mode or self._is_xray_tun_mode():
                 return (
                     f"Готов к запуску: {self._xray_editor_summary()}"
                     if not self._connected
                     else f"Активный сеанс: {self._xray_editor_summary()}"
                 )
             return "Выберите узел, чтобы запустить прокси или VPN и просмотреть состояние сеанса."
+        if not self._settings.tun_mode and not self._settings.enable_system_proxy:
+            if self._connected:
+                return "Активен локальный xray proxy: только приложения с ручной proxy-настройкой попадут в xray"
+            return "Готов к запуску локального xray proxy: без системного прокси приложения должны быть настроены вручную"
         if self._connected:
             return f"Активный сеанс: {self._selected_node_summary()}"
         return f"Готов к запуску: {self._selected_node_summary()}"
@@ -790,10 +823,10 @@ class DashboardPage(QWidget):
 
     def _apply_interaction_state(self) -> None:
         has_profiles = bool(self._nodes) or not self._settings.tun_mode or (
-            self._settings.tun_mode and self._settings.tun_engine == "singbox"
+            self._settings.tun_mode and self._settings.tun_engine in {"singbox", "xray"}
         )
         busy = self._transition_busy or self._connection_phase == "starting"
         self.toggle_btn.setEnabled(has_profiles and not busy)
         self.tun_switch.setEnabled(not busy)
-        self.mode_combo.setEnabled(not busy and self._settings.tun_mode and self._settings.tun_engine == "tun2socks")
+        self.mode_combo.setEnabled(not busy and self._is_legacy_tun2socks_mode())
         self.proxy_switch.setEnabled(not busy and not self._settings.tun_mode)

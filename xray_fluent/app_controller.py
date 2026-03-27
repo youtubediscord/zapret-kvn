@@ -16,7 +16,14 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from .country_flags import CountryResolver, detect_country
 from .config_builder import build_xray_config
-from .singbox_config_builder import build_singbox_outbound
+from .singbox_runtime_planner import (
+    SingboxDocumentState,
+    SingboxRuntimePlan,
+    classify_node_for_singbox,
+    inspect_singbox_document_text,
+    parse_singbox_document,
+    plan_singbox_runtime,
+)
 from .connectivity_test import ConnectivityTestWorker
 from .constants import (
     APP_NAME,
@@ -30,6 +37,7 @@ from .constants import (
     SINGBOX_DEFAULT_CONFIG_NAME,
     SINGBOX_TEMPLATES_DIR,
     XRAY_DEFAULT_CONFIG_NAME,
+    XRAY_TUN_DEFAULT_INTERFACE_NAME,
     XRAY_TEMPLATES_DIR,
 )
 from .diagnostics import export_diagnostics
@@ -49,6 +57,7 @@ from .subprocess_utils import result_output_text, run_text
 from .xray_core_updater import XrayCoreUpdateResult, XrayCoreUpdateWorker
 from .traffic_history import TrafficHistoryStorage
 from .xray_manager import XrayManager, get_xray_version
+from .xray_tun_route_manager import XrayTunRouteManager, get_windows_default_route_context
 from .zapret_manager import ZapretManager
 
 
@@ -70,6 +79,8 @@ def _find_free_api_port(preferred: int | None = None, excluded: set[int] | None 
 
 _XRAY_METRICS_API_TAG = "__app_metrics_api"
 _XRAY_METRICS_API_INBOUND_TAG = "__app_metrics_api_in"
+_XRAY_TUN_INBOUND_TAG = "__app_tun_in"
+
 @dataclass(slots=True)
 class ActiveSessionSnapshot:
     node_id: str | None
@@ -90,17 +101,11 @@ class ActiveSessionSnapshot:
     hybrid: bool
     api_port: int
     xray_inbound_tags: tuple[str, ...]
+    sidecar_relay_port: int
     protect_ss_port: int
     protect_ss_password: str
-
-
-@dataclass(slots=True)
-class SingboxRuntimeConfig:
-    config: dict[str, Any]
-    source_path: Path
-    has_proxy_outbound: bool
-    used_selected_node: bool
-
+    ping_host: str
+    ping_port: int
 
 @dataclass(slots=True)
 class XrayRuntimeConfig:
@@ -111,7 +116,12 @@ class XrayRuntimeConfig:
     socks_port: int
     http_port: int
     api_port: int
+    tun_interface_name: str
+    loop_prevention_interface: str
+    loop_prevention_patched_outbounds: int
     inbound_tags: tuple[str, ...]
+    ping_host: str
+    ping_port: int
 
 
 class AppController(QObject):
@@ -141,6 +151,7 @@ class AppController(QObject):
         self.xray = XrayManager(self)
         self.singbox = SingBoxManager(self)
         self.tun2socks = Tun2SocksManager(self)
+        self._xray_tun_routes = XrayTunRouteManager(self)
         self.zapret = ZapretManager(self)
         self.proxy = ProxyManager()
         self.network_monitor = NetworkMonitor(parent=self)
@@ -170,6 +181,7 @@ class AppController(QObject):
         self._connectivity_worker: ConnectivityTestWorker | None = None
         self._metrics_worker: LiveMetricsWorker | None = None
         self._xray_update_worker: XrayCoreUpdateWorker | None = None
+        self._singbox_document_state: SingboxDocumentState | None = None
         self._ping_total = 0
         self._ping_completed = 0
         self._speed_total = 0
@@ -219,6 +231,7 @@ class AppController(QObject):
         self.tun2socks.error.connect(self._on_singbox_error)
         self.tun2socks.state_changed.connect(self._on_core_state_changed)
         self.tun2socks.stopped.connect(lambda code: self._on_core_stopped("tun2socks", code))
+        self._xray_tun_routes.log_received.connect(self._on_xray_log)
 
         self.network_monitor.network_changed.connect(self._on_network_changed)
 
@@ -301,6 +314,18 @@ class AppController(QObject):
         settings = settings or self.state.settings
         return bool(settings.tun_mode and str(settings.tun_engine) == "singbox")
 
+    def is_xray_tun_mode(self, settings: AppSettings | None = None) -> bool:
+        settings = settings or self.state.settings
+        return bool(settings.tun_mode and str(settings.tun_engine) == "xray")
+
+    def is_legacy_tun2socks_mode(self, settings: AppSettings | None = None) -> bool:
+        settings = settings or self.state.settings
+        return bool(settings.tun_mode and str(settings.tun_engine) == "tun2socks")
+
+    def uses_xray_raw_config(self, settings: AppSettings | None = None) -> bool:
+        settings = settings or self.state.settings
+        return not self.is_singbox_editor_mode(settings) and not self.is_legacy_tun2socks_mode(settings)
+
     def is_xray_editor_mode(self, settings: AppSettings | None = None) -> bool:
         settings = settings or self.state.settings
         return not bool(settings.tun_mode)
@@ -310,7 +335,7 @@ class AppController(QObject):
         if self.is_singbox_editor_mode(settings):
             _, _, has_proxy_outbound = self._inspect_active_singbox_config()
             return not has_proxy_outbound
-        if self.is_xray_editor_mode(settings):
+        if self.uses_xray_raw_config(settings):
             _, _, has_proxy_outbound, _, _, _ = self._inspect_active_xray_config()
             return not has_proxy_outbound
         return False
@@ -562,6 +587,18 @@ class AppController(QObject):
     def get_active_xray_config_name(self) -> str:
         return self.get_active_xray_config_path().name
 
+    def _cache_singbox_document_state(self, path: Path, text: str) -> SingboxDocumentState:
+        state = inspect_singbox_document_text(path, text)
+        self._singbox_document_state = state
+        return state
+
+    def _get_singbox_document_state(self) -> SingboxDocumentState:
+        path = self._ensure_active_singbox_config()
+        if self._singbox_document_state is not None and self._singbox_document_state.source_path == path:
+            return self._singbox_document_state
+        text = path.read_text(encoding="utf-8")
+        return self._cache_singbox_document_state(path, text)
+
     def _ensure_active_singbox_config(self, path: str | Path | None = None) -> Path:
         resolved = self._resolve_singbox_config_path(path)
         resolved.parent.mkdir(parents=True, exist_ok=True)
@@ -580,7 +617,9 @@ class AppController(QObject):
 
     def load_active_singbox_config_text(self) -> tuple[Path, str]:
         path = self._ensure_active_singbox_config()
-        return path, path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
+        self._cache_singbox_document_state(path, text)
+        return path, text
 
     def load_active_xray_config_text(self) -> tuple[Path, str]:
         path = self._ensure_active_xray_config()
@@ -591,7 +630,9 @@ class AppController(QObject):
         if not resolved.exists():
             raise FileNotFoundError(f"Файл не найден: {resolved.name}")
         self._set_active_singbox_config_path(resolved)
-        return resolved, resolved.read_text(encoding="utf-8")
+        text = resolved.read_text(encoding="utf-8")
+        self._cache_singbox_document_state(resolved, text)
+        return resolved, text
 
     def load_xray_config_text(self, path: str | Path) -> tuple[Path, str]:
         resolved = self._resolve_xray_config_path(path)
@@ -604,6 +645,7 @@ class AppController(QObject):
         resolved = self._ensure_active_singbox_config(path)
         resolved.write_text(text, encoding="utf-8")
         self._set_active_singbox_config_path(resolved)
+        self._cache_singbox_document_state(resolved, text)
         return resolved
 
     def save_xray_config_text(self, text: str, path: str | Path | None = None) -> Path:
@@ -653,7 +695,7 @@ class AppController(QObject):
             return False, None, message
 
         path = self.save_xray_config_text(text)
-        if self._active_core == "xray" and (self.connected or self._desired_connected) and not self.state.settings.tun_mode:
+        if self._active_core == "xray" and (self.connected or self._desired_connected) and self.uses_xray_raw_config():
             self._desired_connected = True
             self._request_transition("xray config applied")
             return True, path, "Конфиг сохранён. Применяю изменения xray..."
@@ -668,6 +710,76 @@ class AppController(QObject):
         if not isinstance(outbounds, list):
             return False
         return any(isinstance(outbound, dict) and outbound.get("tag") == "proxy" for outbound in outbounds)
+
+    @staticmethod
+    def _is_local_runtime_host(value: str) -> bool:
+        host = str(value or "").strip().lower()
+        return host in {"", "127.0.0.1", "::1", "localhost"}
+
+    @staticmethod
+    def _infer_singbox_outbound_endpoint(outbound: dict[str, Any]) -> tuple[str, int]:
+        host = str(outbound.get("server") or "").strip()
+        try:
+            port = int(outbound.get("server_port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        if not host or port <= 0 or AppController._is_local_runtime_host(host):
+            return "", 0
+        return host, port
+
+    @staticmethod
+    def _infer_xray_outbound_endpoint(outbound: dict[str, Any]) -> tuple[str, int]:
+        protocol = str(outbound.get("protocol") or "").strip().lower()
+        settings = outbound.get("settings")
+        if not isinstance(settings, dict):
+            return "", 0
+
+        host = ""
+        port = 0
+        if protocol in {"vless", "vmess"}:
+            vnext = settings.get("vnext")
+            if isinstance(vnext, list) and vnext and isinstance(vnext[0], dict):
+                host = str(vnext[0].get("address") or "").strip()
+                try:
+                    port = int(vnext[0].get("port") or 0)
+                except (TypeError, ValueError):
+                    port = 0
+        elif protocol in {"trojan", "shadowsocks", "socks", "http"}:
+            servers = settings.get("servers")
+            if isinstance(servers, list) and servers and isinstance(servers[0], dict):
+                host = str(servers[0].get("address") or "").strip()
+                try:
+                    port = int(servers[0].get("port") or 0)
+                except (TypeError, ValueError):
+                    port = 0
+
+        if not host or port <= 0 or AppController._is_local_runtime_host(host):
+            return "", 0
+        return host, port
+
+    @staticmethod
+    def _infer_singbox_ping_target(payload: dict[str, Any], node: Node | None) -> tuple[str, int]:
+        if node is not None and node.server and node.port > 0:
+            return node.server, node.port
+        for outbound in payload.get("outbounds") or []:
+            if not isinstance(outbound, dict):
+                continue
+            host, port = AppController._infer_singbox_outbound_endpoint(outbound)
+            if host and port > 0:
+                return host, port
+        return "", 0
+
+    @staticmethod
+    def _infer_xray_ping_target(payload: dict[str, Any], node: Node | None) -> tuple[str, int]:
+        if node is not None and node.server and node.port > 0:
+            return node.server, node.port
+        for outbound in payload.get("outbounds") or []:
+            if not isinstance(outbound, dict):
+                continue
+            host, port = AppController._infer_xray_outbound_endpoint(outbound)
+            if host and port > 0:
+                return host, port
+        return "", 0
 
     @staticmethod
     def _ensure_dict(parent: dict[str, Any], key: str) -> dict[str, Any]:
@@ -711,11 +823,6 @@ class AppController(QObject):
                 ports.add(port)
         return ports
 
-    def _ensure_singbox_metrics_contract(self, payload: dict[str, Any]) -> None:
-        experimental = self._ensure_dict(payload, "experimental")
-        clash_api = self._ensure_dict(experimental, "clash_api")
-        clash_api["external_controller"] = f"127.0.0.1:{SINGBOX_CLASH_API_PORT}"
-
     def _ensure_xray_metrics_contract(
         self,
         payload: dict[str, Any],
@@ -733,10 +840,20 @@ class AppController(QObject):
         system_policy["statsOutboundUplink"] = True
         system_policy["statsOutboundDownlink"] = True
 
+        outbounds = self._ensure_list(payload, "outbounds")
         api = self._ensure_dict(payload, "api")
-        # We intentionally own a dedicated runtime API tag for metrics so the
-        # observability path does not depend on arbitrary user api wiring.
+        existing_api_tag = str(api.get("tag") or "").strip()
         api_tag = _XRAY_METRICS_API_TAG
+        if existing_api_tag:
+            for outbound in outbounds:
+                if not isinstance(outbound, dict):
+                    continue
+                if str(outbound.get("tag") or "").strip() != existing_api_tag:
+                    continue
+                protocol = str(outbound.get("protocol") or "").strip().lower()
+                if protocol in {"freedom", "loopback"}:
+                    api_tag = existing_api_tag
+                break
         api["tag"] = api_tag
         services = api.get("services")
         normalized_services = [str(item) for item in services] if isinstance(services, list) else []
@@ -782,7 +899,6 @@ class AppController(QObject):
         }
         self._replace_or_append_tagged(inbounds, _XRAY_METRICS_API_INBOUND_TAG, metrics_inbound)
 
-        outbounds = self._ensure_list(payload, "outbounds")
         has_api_outbound = any(
             isinstance(outbound, dict) and str(outbound.get("tag") or "") == api_tag
             for outbound in outbounds
@@ -830,17 +946,64 @@ class AppController(QObject):
 
         return api_port, tuple(user_inbound_tags)
 
+    def _ensure_xray_tun_contract(self, payload: dict[str, Any]) -> str:
+        inbounds = self._ensure_list(payload, "inbounds")
+        for inbound in inbounds:
+            if not isinstance(inbound, dict):
+                continue
+            if str(inbound.get("protocol") or "").strip().lower() != "tun":
+                continue
+            settings = self._ensure_dict(inbound, "settings")
+            return str(settings.get("name") or "").strip() or XRAY_TUN_DEFAULT_INTERFACE_NAME
+
+        inbounds.append(
+            {
+                "tag": _XRAY_TUN_INBOUND_TAG,
+                "protocol": "tun",
+                "settings": {},
+                "sniffing": {
+                    "enabled": True,
+                    "destOverride": ["http", "tls", "quic"],
+                    "routeOnly": True,
+                },
+            }
+        )
+        return XRAY_TUN_DEFAULT_INTERFACE_NAME
+
+    @staticmethod
+    def _xray_outbound_is_loop_protected(outbound: dict[str, Any]) -> bool:
+        send_through = str(outbound.get("sendThrough") or "").strip()
+        if send_through and send_through not in {"0.0.0.0", "::"}:
+            return True
+        stream_settings = outbound.get("streamSettings")
+        if not isinstance(stream_settings, dict):
+            return False
+        sockopt = stream_settings.get("sockopt")
+        if not isinstance(sockopt, dict):
+            return False
+        return bool(str(sockopt.get("interface") or "").strip())
+
+    def _apply_xray_tun_loop_prevention(self, payload: dict[str, Any], interface_alias: str) -> int:
+        patched = 0
+        outbounds = self._ensure_list(payload, "outbounds")
+        for outbound in outbounds:
+            if not isinstance(outbound, dict):
+                continue
+            tag = str(outbound.get("tag") or "").strip()
+            protocol = str(outbound.get("protocol") or "").strip().lower()
+            if tag in {_XRAY_METRICS_API_TAG, "api"} or protocol in {"blackhole", "loopback", "dns"}:
+                continue
+            if self._xray_outbound_is_loop_protected(outbound):
+                continue
+            stream_settings = self._ensure_dict(outbound, "streamSettings")
+            sockopt = self._ensure_dict(stream_settings, "sockopt")
+            sockopt["interface"] = interface_alias
+            patched += 1
+        return patched
+
     def _inspect_active_singbox_config(self) -> tuple[Path, str, bool]:
-        path, text = self.load_active_singbox_config_text()
-        text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        has_proxy_outbound = False
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            payload = None
-        if payload is not None:
-            has_proxy_outbound = self._config_has_proxy_outbound(payload)
-        return path, text_hash, has_proxy_outbound
+        state = self._get_singbox_document_state()
+        return state.source_path, state.text_hash, state.has_proxy_outbound
 
     @staticmethod
     def _extract_xray_runtime_ports(payload: Any) -> tuple[int, int, int]:
@@ -895,43 +1058,54 @@ class AppController(QObject):
             socks_port, http_port, api_port = self._extract_xray_runtime_ports(payload)
         return path, text_hash, has_proxy_outbound, socks_port, http_port, api_port
 
-    def _build_runtime_singbox_config(self, node: Node | None = None) -> SingboxRuntimeConfig:
+    def _plan_runtime_singbox(self, node: Node | None = None) -> SingboxRuntimePlan:
         source_path, text = self.load_active_singbox_config_text()
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"{source_path.name}: {self._format_json_error_message(text, exc)}") from exc
-
-        if not isinstance(payload, dict):
-            raise ValueError("Корень sing-box config должен быть JSON-объектом.")
-
-        self._ensure_singbox_metrics_contract(payload)
-
-        outbounds = payload.get("outbounds")
-        has_proxy_outbound = False
-        used_selected_node = False
-        if isinstance(outbounds, list):
-            for index, outbound in enumerate(outbounds):
-                if not isinstance(outbound, dict) or outbound.get("tag") != "proxy":
-                    continue
-                has_proxy_outbound = True
-                if node is None:
-                    raise ValueError("В конфиге есть outbound tag `proxy`. Выберите сервер для запуска sing-box.")
-                try:
-                    outbounds[index] = build_singbox_outbound(node, tag="proxy")
-                except ValueError as exc:
-                    raise ValueError(f"Не удалось заменить outbound tag `proxy`: {exc}") from exc
-                used_selected_node = True
-                break
-
-        return SingboxRuntimeConfig(
-            config=payload,
-            source_path=source_path,
-            has_proxy_outbound=has_proxy_outbound,
-            used_selected_node=used_selected_node,
+        document = parse_singbox_document(source_path, text)
+        preferred_relay_port = 0
+        preferred_protect_port = 0
+        preferred_protect_password = ""
+        session = self._active_session
+        if session is not None and session.active_core == "singbox" and session.hybrid:
+            preferred_relay_port = session.sidecar_relay_port
+            preferred_protect_port = session.protect_ss_port
+            preferred_protect_password = session.protect_ss_password
+        return plan_singbox_runtime(
+            document,
+            node,
+            preferred_relay_port=preferred_relay_port,
+            preferred_protect_port=preferred_protect_port,
+            preferred_protect_password=preferred_protect_password,
         )
 
-    def _build_runtime_xray_config(self, node: Node | None = None) -> XrayRuntimeConfig:
+    def _start_singbox_runtime_plan(self, plan: SingboxRuntimePlan) -> bool:
+        if plan.xray_sidecar is not None:
+            self._protect_ss_port = plan.xray_sidecar.protect_port
+            self._protect_ss_password = plan.xray_sidecar.protect_password
+            self._log(
+                "[tun] starting hybrid xray sidecar "
+                f"relay=127.0.0.1:{plan.xray_sidecar.relay_port} "
+                f"protect=127.0.0.1:{plan.xray_sidecar.protect_port}"
+            )
+            if not self.xray.start(self.state.settings.xray_path, plan.xray_sidecar.config):
+                self._protect_ss_port = 0
+                self._protect_ss_password = ""
+                return False
+        else:
+            self._protect_ss_port = 0
+            self._protect_ss_password = ""
+
+        sb_ok = self.singbox.start(self.state.settings.singbox_path, plan.singbox_config)
+        self._log(f"[tun] sing-box start result: {sb_ok}")
+        if sb_ok:
+            return True
+
+        if plan.xray_sidecar is not None and self.xray.is_running:
+            self.xray.stop()
+        self._protect_ss_port = 0
+        self._protect_ss_password = ""
+        return False
+
+    def _build_runtime_xray_config(self, node: Node | None = None, *, tun_mode: bool = False) -> XrayRuntimeConfig:
         source_path, text = self.load_active_xray_config_text()
         try:
             payload = json.loads(text)
@@ -940,6 +1114,10 @@ class AppController(QObject):
 
         if not isinstance(payload, dict):
             raise ValueError("Корень xray config должен быть JSON-объектом.")
+
+        tun_interface_name = ""
+        if tun_mode:
+            tun_interface_name = self._ensure_xray_tun_contract(payload)
 
         api_port, inbound_tags = self._ensure_xray_metrics_contract(payload, allocate_port=True)
 
@@ -959,7 +1137,36 @@ class AppController(QObject):
                 used_selected_node = True
                 break
 
+        loop_prevention_interface = ""
+        loop_prevention_patched_outbounds = 0
+        if tun_mode:
+            needs_loop_patch = False
+            if isinstance(outbounds, list):
+                for outbound in outbounds:
+                    if not isinstance(outbound, dict):
+                        continue
+                    tag = str(outbound.get("tag") or "").strip()
+                    protocol = str(outbound.get("protocol") or "").strip().lower()
+                    if tag in {_XRAY_METRICS_API_TAG, "api"} or protocol in {"blackhole", "loopback", "dns"}:
+                        continue
+                    if not self._xray_outbound_is_loop_protected(outbound):
+                        needs_loop_patch = True
+                        break
+            if needs_loop_patch:
+                context = get_windows_default_route_context()
+                if context is None:
+                    raise ValueError(
+                        "Не удалось определить активный сетевой интерфейс для xray TUN loop prevention. "
+                        "Либо укажите streamSettings.sockopt.interface/sendThrough в raw xray config, "
+                        "либо используйте sing-box TUN."
+                    )
+                loop_prevention_interface = context.interface_alias
+                loop_prevention_patched_outbounds = self._apply_xray_tun_loop_prevention(
+                    payload, loop_prevention_interface
+                )
+
         socks_port, http_port, _ = self._extract_xray_runtime_ports(payload)
+        ping_host, ping_port = self._infer_xray_ping_target(payload, node if used_selected_node else None)
         return XrayRuntimeConfig(
             config=payload,
             source_path=source_path,
@@ -968,7 +1175,12 @@ class AppController(QObject):
             socks_port=socks_port,
             http_port=http_port,
             api_port=api_port,
+            tun_interface_name=tun_interface_name,
+            loop_prevention_interface=loop_prevention_interface,
+            loop_prevention_patched_outbounds=loop_prevention_patched_outbounds,
             inbound_tags=inbound_tags,
+            ping_host=ping_host,
+            ping_port=ping_port,
         )
 
     def _transition_signature(
@@ -982,35 +1194,51 @@ class AppController(QObject):
         node = node or self.selected_node
         if self.is_singbox_editor_mode(settings):
             source_path, config_hash, has_proxy_outbound = self._inspect_active_singbox_config()
-            return self._signature(
-                {
-                    "mode": "singbox-editor",
-                    "singbox_path": str(settings.singbox_path),
-                    "config_file": str(source_path.name),
-                    "config_hash": config_hash,
-                    "has_proxy_outbound": has_proxy_outbound,
-                    "node_id": node.id if has_proxy_outbound and node else None,
-                    "node_outbound": node.outbound if has_proxy_outbound and node else None,
-                }
-            )
-        if self.is_xray_editor_mode(settings):
+            planner_outcome = "native_singbox"
+            if has_proxy_outbound and node is not None:
+                planner_outcome = classify_node_for_singbox(node)
+            signature_payload = {
+                "mode": "singbox-editor",
+                "singbox_path": str(settings.singbox_path),
+                "config_file": str(source_path.name),
+                "config_hash": config_hash,
+                "has_proxy_outbound": has_proxy_outbound,
+                "planner_outcome": planner_outcome,
+                "node_id": node.id if has_proxy_outbound and node else None,
+                "node_outbound": node.outbound if has_proxy_outbound and node else None,
+            }
+            if planner_outcome == "hybrid_xray_sidecar":
+                signature_payload["xray_path"] = str(settings.xray_path)
+            return self._signature(signature_payload)
+        if self.uses_xray_raw_config(settings):
             source_path, config_hash, has_proxy_outbound, socks_port, http_port, api_port = self._inspect_active_xray_config()
-            return self._signature(
-                {
-                    "mode": "xray-editor",
-                    "xray_path": str(settings.xray_path),
-                    "config_file": str(source_path.name),
-                    "config_hash": config_hash,
-                    "has_proxy_outbound": has_proxy_outbound,
-                    "node_id": node.id if has_proxy_outbound and node else None,
-                    "node_outbound": node.outbound if has_proxy_outbound and node else None,
-                    "proxy_enabled": bool(settings.enable_system_proxy),
-                    "proxy_bypass_lan": self._system_proxy_bypass_lan(settings),
-                    "socks_port": int(socks_port),
-                    "http_port": int(http_port),
-                    "api_port": int(api_port),
-                }
-            )
+            signature_payload = {
+                "mode": "xray-tun" if self.is_xray_tun_mode(settings) else "xray-direct",
+                "xray_path": str(settings.xray_path),
+                "config_file": str(source_path.name),
+                "config_hash": config_hash,
+                "has_proxy_outbound": has_proxy_outbound,
+                "node_id": node.id if has_proxy_outbound and node else None,
+                "node_outbound": node.outbound if has_proxy_outbound and node else None,
+                "api_port": int(api_port),
+            }
+            if self.is_xray_tun_mode(settings):
+                signature_payload.update(
+                    {
+                        "tun_mode": True,
+                        "tun_engine": "xray",
+                    }
+                )
+            else:
+                signature_payload.update(
+                    {
+                        "proxy_enabled": bool(settings.enable_system_proxy),
+                        "proxy_bypass_lan": self._system_proxy_bypass_lan(settings),
+                        "socks_port": int(socks_port),
+                        "http_port": int(http_port),
+                    }
+                )
+            return self._signature(signature_payload)
         return self._signature(
             {
                 "node_id": node.id if node else None,
@@ -1035,22 +1263,23 @@ class AppController(QObject):
         settings = settings or self.state.settings
         routing = routing or self.state.routing
         node = node or self.selected_node
-        if self.is_xray_editor_mode(settings):
+        if self.uses_xray_raw_config(settings):
             source_path, config_hash, has_proxy_outbound, socks_port, http_port, api_port = self._inspect_active_xray_config()
-            return self._signature(
-                {
-                    "mode": "xray-editor",
-                    "xray_path": str(settings.xray_path),
-                    "config_file": str(source_path.name),
-                    "config_hash": config_hash,
-                    "has_proxy_outbound": has_proxy_outbound,
-                    "node_id": node.id if has_proxy_outbound and node else None,
-                    "node_outbound": node.outbound if has_proxy_outbound and node else None,
-                    "socks_port": int(socks_port),
-                    "http_port": int(http_port),
-                    "api_port": int(api_port),
-                }
-            )
+            signature_payload = {
+                "mode": "xray-tun" if self.is_xray_tun_mode(settings) else "xray-direct",
+                "xray_path": str(settings.xray_path),
+                "config_file": str(source_path.name),
+                "config_hash": config_hash,
+                "has_proxy_outbound": has_proxy_outbound,
+                "node_id": node.id if has_proxy_outbound and node else None,
+                "node_outbound": node.outbound if has_proxy_outbound and node else None,
+                "socks_port": int(socks_port),
+                "http_port": int(http_port),
+                "api_port": int(api_port),
+            }
+            if self.is_xray_tun_mode(settings):
+                signature_payload.update({"tun_mode": True, "tun_engine": "xray"})
+            return self._signature(signature_payload)
         return self._signature(
             {
                 "node_id": node.id if node else None,
@@ -1076,12 +1305,19 @@ class AppController(QObject):
             return ""
         if self.is_singbox_editor_mode(settings):
             return self._transition_signature(node, settings, routing)
-        if settings.tun_engine == "tun2socks":
+        if self.is_legacy_tun2socks_mode(settings):
             return self._signature(
                 {
                     "mode": "tun2socks",
                     "server": node.server if node else "",
                     "socks_port": int(settings.socks_port),
+                }
+            )
+        if self.is_xray_tun_mode(settings):
+            return self._signature(
+                {
+                    "mode": "xray-native-tun",
+                    "xray_layer_signature": self._xray_layer_signature(node, settings, routing),
                 }
             )
         return self._signature(
@@ -1102,21 +1338,28 @@ class AppController(QObject):
         tun: bool,
         core: str,
         api_port: int,
+        hybrid: bool = False,
         socks_port: int | None = None,
         http_port: int | None = None,
         xray_inbound_tags: tuple[str, ...] | None = None,
+        sidecar_relay_port: int = 0,
         protect_ss_port: int = 0,
         protect_ss_password: str = "",
+        ping_host: str = "",
+        ping_port: int = 0,
     ) -> None:
         settings = self.state.settings
         routing = self.state.routing
-        hybrid = False
         if socks_port is None:
             socks_port = int(settings.socks_port)
         if http_port is None:
             http_port = int(settings.http_port)
         if xray_inbound_tags is None:
             xray_inbound_tags = ()
+        if not ping_host and node is not None:
+            ping_host = node.server
+        if ping_port <= 0 and node is not None:
+            ping_port = int(node.port)
         proxy_bypass_lan = bool(routing.bypass_lan) if tun else self._system_proxy_bypass_lan(settings)
         self._active_session = ActiveSessionSnapshot(
             node_id=node.id if node else None,
@@ -1137,8 +1380,11 @@ class AppController(QObject):
             hybrid=hybrid,
             api_port=int(api_port),
             xray_inbound_tags=tuple(xray_inbound_tags),
+            sidecar_relay_port=int(sidecar_relay_port),
             protect_ss_port=int(protect_ss_port),
             protect_ss_password=str(protect_ss_password),
+            ping_host=str(ping_host),
+            ping_port=int(ping_port),
         )
         self._blocked_transition_signature = ""
 
@@ -1177,6 +1423,8 @@ class AppController(QObject):
                 socks_port=socks_port,
                 http_port=http_port,
                 xray_inbound_tags=self._active_session.xray_inbound_tags if self._active_session else (),
+                ping_host=self._active_session.ping_host if self._active_session else "",
+                ping_port=self._active_session.ping_port if self._active_session else 0,
             )
         return True
 
@@ -1376,6 +1624,7 @@ class AppController(QObject):
             self.singbox.stop()
         if self.xray.is_running:
             self.xray.stop()
+        self._xray_tun_routes.cleanup()
         if self.zapret.running:
             self.zapret.stop()
         # Always disable system proxy on exit to prevent leaked proxy
@@ -1428,10 +1677,10 @@ class AppController(QObject):
         node = self._get_node_by_id(node_id) if node_id else self.selected_node
         try:
             if self.is_singbox_editor_mode():
-                runtime = self._build_runtime_singbox_config(node)
-                return json.dumps(runtime.config, ensure_ascii=True, indent=2)
-            if self.is_xray_editor_mode():
-                runtime = self._build_runtime_xray_config(node)
+                plan = self._plan_runtime_singbox(node)
+                return json.dumps(plan.singbox_config, ensure_ascii=True, indent=2)
+            if self.uses_xray_raw_config():
+                runtime = self._build_runtime_xray_config(node, tun_mode=self.is_xray_tun_mode())
                 return json.dumps(runtime.config, ensure_ascii=True, indent=2)
             if not node:
                 return None
@@ -1595,6 +1844,8 @@ class AppController(QObject):
 
     def _compute_connected_state(self) -> bool:
         if self._active_core == "singbox":
+            if self._active_session is not None and self._active_session.hybrid:
+                return self.singbox.is_running and self.xray.is_running
             return self.singbox.is_running
         if self._active_core == "tun2socks":
             return self.tun2socks.is_running and self.xray.is_running
@@ -1622,6 +1873,7 @@ class AppController(QObject):
         reset_auto_switch_cycle: bool,
         reset_auto_switch_cooldown: bool,
     ) -> None:
+        self._xray_tun_routes.cleanup()
         self._xray_api_port = 0
         self._protect_ss_port = 0
         self._protect_ss_password = ""
@@ -1705,10 +1957,11 @@ class AppController(QObject):
 
             node = self.selected_node
             singbox_editor_mode = self.is_singbox_editor_mode()
-            xray_editor_mode = self.is_xray_editor_mode()
+            xray_raw_mode = self.uses_xray_raw_config()
+            legacy_tun2socks_mode = self.is_legacy_tun2socks_mode()
             if node is None and not self._can_connect_without_selected_node():
                 message = "Сначала выберите сервер."
-                if singbox_editor_mode or xray_editor_mode:
+                if singbox_editor_mode or xray_raw_mode:
                     message = "В конфиге есть outbound tag `proxy`. Сначала выберите сервер."
                 self._set_connection_status("error", message, level="warning")
                 return False
@@ -1721,7 +1974,7 @@ class AppController(QObject):
             prev_active_core = self._active_core
             tun = self.state.settings.tun_mode
             self._xray_api_port = 0
-            if tun and not singbox_editor_mode:
+            if legacy_tun2socks_mode:
                 try:
                     self._xray_api_port = _find_free_api_port(
                         excluded={self.state.settings.socks_port, self.state.settings.http_port},
@@ -1730,11 +1983,11 @@ class AppController(QObject):
                     self._set_connection_status("error", "Не удалось найти свободный порт для API Xray", level="error")
                     return False
 
-            runtime_singbox: SingboxRuntimeConfig | None = None
+            singbox_plan: SingboxRuntimePlan | None = None
             runtime_xray: XrayRuntimeConfig | None = None
             if singbox_editor_mode:
                 session_label = node.name if node else self.get_active_singbox_config_name()
-            elif xray_editor_mode:
+            elif xray_raw_mode:
                 session_label = node.name if node else self.get_active_xray_config_name()
             else:
                 session_label = node.name if node else "unknown"
@@ -1762,34 +2015,86 @@ class AppController(QObject):
                 if engine == "singbox":
                     self._active_core = "singbox"
                     try:
-                        runtime_singbox = self._build_runtime_singbox_config(node)
+                        singbox_plan = self._plan_runtime_singbox(node)
                     except ValueError as exc:
                         self._active_core = prev_active_core
                         self._set_connection_status("error", str(exc), level="error")
                         return False
 
-                    session_label = runtime_singbox.source_path.name
-                    if runtime_singbox.used_selected_node and node is not None:
-                        session_label = f"{runtime_singbox.source_path.name} / {node.name}"
-                    self._set_connection_status("starting", f"Запуск VPN: {session_label}...", level="info")
-                    self._log(f"[tun] starting sing-box TUN from {runtime_singbox.source_path}")
-                    if runtime_singbox.used_selected_node and node is not None:
-                        self._log(f"[tun] outbound tag 'proxy' replaced from selected node: {node.name}")
+                    session_label = singbox_plan.source_path.name
+                    if singbox_plan.used_selected_node and node is not None:
+                        session_label = f"{singbox_plan.source_path.name} / {node.name}"
+                    start_message = (
+                        f"Запуск VPN: {session_label} (sing-box + xray sidecar)..."
+                        if singbox_plan.is_hybrid
+                        else f"Запуск VPN: {session_label}..."
+                    )
+                    self._set_connection_status("starting", start_message, level="info")
+                    self._log(
+                        f"[tun] sing-box planner outcome: {singbox_plan.outcome} "
+                        f"from {singbox_plan.source_path}"
+                    )
+                    if singbox_plan.used_selected_node and node is not None:
+                        if singbox_plan.is_hybrid:
+                            self._log(
+                                f"[tun] outbound tag 'proxy' replaced with local xray relay for unsupported node: {node.name}"
+                            )
+                        else:
+                            self._log(f"[tun] outbound tag 'proxy' replaced from selected node: {node.name}")
 
-                    sb_ok = self.singbox.start(self.state.settings.singbox_path, runtime_singbox.config)
-                    self._log(f"[tun] sing-box start result: {sb_ok}")
-                    if not sb_ok:
+                    if not self._start_singbox_runtime_plan(singbox_plan):
                         self._set_connection_status(
                             "error",
-                            "Не удалось создать TUN адаптер. Проверьте наличие wintun.dll в core/.",
+                            (
+                                "Не удалось запустить sing-box hybrid runtime. Проверьте путь к Xray и наличие wintun.dll в core/."
+                                if singbox_plan.is_hybrid
+                                else "Не удалось создать TUN адаптер. Проверьте наличие wintun.dll в core/."
+                            ),
                             level="error",
                         )
                         self._active_core = prev_active_core
                         return False
-                    self._protect_ss_port = 0
-                    self._protect_ss_password = ""
-                else:
-                    # --- tun2socks TUN (stable, default) ---
+                elif engine == "xray":
+                    self._active_core = "xray"
+                    try:
+                        runtime_xray = self._build_runtime_xray_config(node, tun_mode=True)
+                    except ValueError as exc:
+                        self._active_core = prev_active_core
+                        self._set_connection_status("error", str(exc), level="error")
+                        return False
+
+                    session_label = runtime_xray.source_path.name
+                    if runtime_xray.used_selected_node and node is not None:
+                        session_label = f"{runtime_xray.source_path.name} / {node.name}"
+                    self._set_connection_status("starting", f"Запуск VPN: {session_label}...", level="info")
+                    self._log(f"[tun] starting xray TUN from {runtime_xray.source_path}")
+                    if runtime_xray.used_selected_node and node is not None:
+                        self._log(f"[tun] outbound tag 'proxy' replaced from selected node: {node.name}")
+                    if runtime_xray.loop_prevention_patched_outbounds > 0:
+                        self._log(
+                            "[tun] xray loop prevention bound "
+                            f"{runtime_xray.loop_prevention_patched_outbounds} outbound(s) to interface "
+                            f"{runtime_xray.loop_prevention_interface}"
+                        )
+
+                    self._xray_api_port = runtime_xray.api_port
+                    xray_ok = self.xray.start(self.state.settings.xray_path, runtime_xray.config)
+                    if not xray_ok:
+                        self._active_core = prev_active_core
+                        return False
+                    route_ok = self._xray_tun_routes.setup(runtime_xray.tun_interface_name)
+                    if not route_ok:
+                        self.xray.stop()
+                        self._set_connection_status(
+                            "error",
+                            "Не удалось применить системный маршрут для Xray TUN. "
+                            "Проверьте права Администратора и версию Xray-core с native TUN support.",
+                            level="error",
+                        )
+                        self._active_core = prev_active_core
+                        return False
+                elif engine == "tun2socks":
+                    # --- legacy tun2socks TUN path ---
                     self._active_core = "tun2socks"
                     config = build_xray_config(node, self.state.routing, self.state.settings, api_port=self._xray_api_port)
                     config["log"] = {"loglevel": "error"}
@@ -1813,11 +2118,15 @@ class AppController(QObject):
                         )
                         self._active_core = prev_active_core
                         return False
+                else:
+                    self._active_core = prev_active_core
+                    self._set_connection_status("error", f"Неизвестный TUN engine: {engine}", level="error")
+                    return False
             else:
                 self._active_core = "xray"
                 self._set_connection_status("starting", f"Запуск прокси: {session_label}...", level="info")
                 try:
-                    runtime_xray = self._build_runtime_xray_config(node)
+                    runtime_xray = self._build_runtime_xray_config(node, tun_mode=False)
                 except ValueError as exc:
                     self._active_core = prev_active_core
                     self._set_connection_status("error", str(exc), level="error")
@@ -1865,9 +2174,9 @@ class AppController(QObject):
                     self.proxy.disable(restore_previous=True)
 
             session_node = node
-            if singbox_editor_mode and runtime_singbox is not None and not runtime_singbox.used_selected_node:
+            if singbox_editor_mode and singbox_plan is not None and not singbox_plan.used_selected_node:
                 session_node = None
-            if xray_editor_mode and runtime_xray is not None and not runtime_xray.used_selected_node:
+            if xray_raw_mode and runtime_xray is not None and not runtime_xray.used_selected_node:
                 session_node = None
 
             if session_node is not None:
@@ -1875,7 +2184,14 @@ class AppController(QObject):
 
             self._set_connection_status(
                 "running",
-                f"Подключено: {session_label}" + (" (TUN)" if tun else ""),
+                (
+                    f"Подключено: {session_label}"
+                    + (
+                        " (TUN, xray sidecar)"
+                        if tun and singbox_plan is not None and singbox_plan.is_hybrid
+                        else " (TUN)" if tun else ""
+                    )
+                ),
                 level="success",
             )
             self._capture_active_session(
@@ -1883,14 +2199,31 @@ class AppController(QObject):
                 tun=tun,
                 core=self._active_core,
                 api_port=self._xray_api_port,
+                hybrid=bool(singbox_plan is not None and singbox_plan.is_hybrid),
                 socks_port=runtime_xray.socks_port if runtime_xray is not None else None,
                 http_port=runtime_xray.http_port if runtime_xray is not None else None,
                 xray_inbound_tags=runtime_xray.inbound_tags if runtime_xray is not None else ("socks-in", "http-in"),
+                sidecar_relay_port=singbox_plan.xray_sidecar.relay_port if singbox_plan and singbox_plan.xray_sidecar else 0,
                 protect_ss_port=self._protect_ss_port,
                 protect_ss_password=self._protect_ss_password,
+                ping_host=(
+                    runtime_xray.ping_host if runtime_xray is not None else
+                    self._infer_singbox_ping_target(
+                        singbox_plan.singbox_config if singbox_plan is not None else {},
+                        session_node,
+                    )[0]
+                ),
+                ping_port=(
+                    runtime_xray.ping_port if runtime_xray is not None else
+                    self._infer_singbox_ping_target(
+                        singbox_plan.singbox_config if singbox_plan is not None else {},
+                        session_node,
+                    )[1]
+                ),
             )
             self.save()
-            self._traffic_history.start_session(session_label, self._active_core)
+            session_mode = "xray-tun" if tun and self._active_core == "xray" else self._active_core
+            self._traffic_history.start_session(session_label, session_mode)
             return True
         finally:
             self._connecting = False
@@ -1903,7 +2236,8 @@ class AppController(QObject):
                 reset_auto_switch_cycle=not self._auto_switch_transitioning,
                 reset_auto_switch_cooldown=not self._reconnecting and not self._auto_switch_transitioning,
             )
-            if emit_status and self._active_core in ("singbox", "tun2socks"):
+            active_tun = self._active_session.tun_mode if self._active_session is not None else self.state.settings.tun_mode
+            if emit_status and active_tun:
                 self.status.emit("info", "Остановка VPN...")
             stopped = self._stop_active_connection_processes(disable_proxy=disable_proxy)
             if stopped:
@@ -1924,7 +2258,7 @@ class AppController(QObject):
         try:
             self._log(f"[proxy-hot-swap] {reason}")
             try:
-                runtime_xray = self._build_runtime_xray_config(node)
+                runtime_xray = self._build_runtime_xray_config(node, tun_mode=False)
             except ValueError as exc:
                 self._set_connection_status("error", str(exc), level="error")
                 return False
@@ -1983,6 +2317,8 @@ class AppController(QObject):
                 socks_port=runtime_xray.socks_port,
                 http_port=runtime_xray.http_port,
                 xray_inbound_tags=runtime_xray.inbound_tags,
+                ping_host=runtime_xray.ping_host,
+                ping_port=runtime_xray.ping_port,
             )
             self._set_connection_status("running", f"Переключено: {session_label}", level="success")
             self.save()
@@ -2039,7 +2375,7 @@ class AppController(QObject):
         self.schedule_save()
 
         if self.connected or self._desired_connected:
-            if not self.state.settings.tun_mode or self._active_core == "singbox" or self.is_singbox_editor_mode():
+            if not self.is_legacy_tun2socks_mode():
                 return
             self._request_transition("routing changed")
 
@@ -2212,13 +2548,19 @@ class AppController(QObject):
             self.status.emit("info", message)
 
     def _start_metrics_worker(self) -> None:
+        session = self._active_session
         node = self.selected_node
-        ping_host = node.server if node else ""
-        ping_port = node.port if node else 0
+        ping_host = session.ping_host if session is not None else (node.server if node else "")
+        ping_port = session.ping_port if session is not None else (node.port if node else 0)
         self._log(f"[metrics] starting worker, active_core={self._active_core}")
 
         self._stop_metrics_worker()
-        mode = "singbox" if self._active_core == "singbox" else "xray"
+        if self._active_core == "singbox":
+            mode = "singbox"
+        elif self._active_session is not None and self._active_session.tun_mode:
+            mode = "xray-tun"
+        else:
+            mode = "xray"
         socks_port = self._active_session.socks_port if self._active_session else self.state.settings.socks_port
         http_port = self._active_session.http_port if self._active_session else self.state.settings.http_port
         inbound_tags = self._active_session.xray_inbound_tags if self._active_session else ()
@@ -2303,7 +2645,7 @@ class AppController(QObject):
 
     def _on_xray_log(self, line: str) -> None:
         # In TUN mode, throttle noisy per-connection logs to prevent UI freeze
-        if self._active_core in ("singbox", "tun2socks") and "accepted" in line:
+        if self.state.settings.tun_mode and "accepted" in line:
             self._tun_log_count = getattr(self, "_tun_log_count", 0) + 1
             # Only log to file, skip UI — emit summary every 100 lines
             self._logger.info(line)
@@ -2608,7 +2950,7 @@ class AppController(QObject):
         self._log(f"[network] changed: {old} -> {new}")
         # TUN mode creates a virtual adapter which triggers network change —
         # reconnecting would kill the TUN and cause an infinite loop
-        if self._active_core in ("singbox", "tun2socks") and self.state.settings.tun_mode:
+        if self.state.settings.tun_mode:
             self._log("[network] ignoring change in TUN mode")
             return
         if self.connected and self.state.settings.reconnect_on_network_change:
@@ -2616,7 +2958,7 @@ class AppController(QObject):
             self._request_transition("network changed")
 
     def _hot_swap_node(self, reason: str) -> bool:
-        """Switch node in TUN mode. Restarts only xray; TUN adapter stays alive."""
+        """Handle node switch while TUN is active."""
         node = self.selected_node
         session = self._active_session
         if not node or session is None:
@@ -2627,7 +2969,7 @@ class AppController(QObject):
         self._protect_ss_port = session.protect_ss_port
         self._protect_ss_password = session.protect_ss_password
 
-        # tun2socks mode: always hot-swap xray only
+        # legacy tun2socks mode: restart only xray while the TUN adapter stays up
         if self._active_core == "tun2socks":
             self._switching = True
             try:
@@ -2645,6 +2987,8 @@ class AppController(QObject):
                         core="tun2socks",
                         api_port=self._xray_api_port,
                         xray_inbound_tags=("socks-in", "http-in"),
+                        ping_host=node.server,
+                        ping_port=node.port,
                     )
                     self._set_connection_status("running", f"Переключено: {node.name} (TUN)", level="success")
                     self.save()
@@ -2663,8 +3007,8 @@ class AppController(QObject):
                 else:
                     self._stop_metrics_worker()
 
-        # sing-box editor mode keeps the config in the editor file, so node
-        # changes are applied via a full reconnect when they matter.
+        # sing-box raw mode keeps the user config as the source of truth and may
+        # switch between native and hybrid planner outcomes, so reconnect.
         return self._reconnect(f"{reason} (sing-box config change)")
 
     def _reconnect(self, reason: str) -> bool:

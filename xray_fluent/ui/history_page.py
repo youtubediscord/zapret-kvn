@@ -181,7 +181,12 @@ class HistoryPage(QWidget):
             self._sessions_table.setItem(row, 1, QTableWidgetItem(s.node_name))
 
             # Mode
-            mode_text = {"xray": "Прокси", "singbox": "TUN (sing-box)", "tun2socks": "TUN (tun2socks)"}.get(s.mode, s.mode)
+            mode_text = {
+                "xray": "Прокси",
+                "xray-tun": "TUN (xray experimental)",
+                "singbox": "TUN (sing-box)",
+                "tun2socks": "TUN (tun2socks)",
+            }.get(s.mode, s.mode)
             mode_item = QTableWidgetItem(mode_text)
             if "tun" in s.mode.lower() or s.mode == "singbox":
                 mode_item.setForeground(QColor("#3498db"))

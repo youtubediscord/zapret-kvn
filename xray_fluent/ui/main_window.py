@@ -863,7 +863,7 @@ class MainWindow(FluentWindow):
             node_text = node.name
         elif self.controller.is_singbox_editor_mode():
             node_text = self.controller.get_active_singbox_config_name()
-        elif self.controller.is_xray_editor_mode():
+        elif self.controller.uses_xray_raw_config():
             node_text = self.controller.get_active_xray_config_name()
         else:
             node_text = "Нет сервера"

@@ -102,7 +102,7 @@ class LiveMetricsWorker(QThread):
             if iteration_count % 2 == 0:
                 if self._mode == "singbox":
                     process_stats = collect_process_stats(self._clash_api_port)
-                else:
+                elif self._mode == "xray":
                     process_stats = self._collect_proxy_process_stats(
                         proxy_prev_bytes, proxy_closed_bytes,
                     )

@@ -37,11 +37,13 @@ STATE_FILE = DATA_DIR / "state.enc"
 XRAY_CONFIG_FILE = RUNTIME_DIR / "xray_config.json"
 XRAY_DEFAULT_CONFIG_NAME = "default.json"
 XRAY_PATH_DEFAULT = BASE_DIR / "core" / "xray.exe"
+XRAY_TUN_DEFAULT_INTERFACE_NAME = "xray0"
 
 SINGBOX_CONFIG_FILE = RUNTIME_DIR / "singbox_config.json"
 SINGBOX_DEFAULT_CONFIG_NAME = "default.json"
 SINGBOX_PATH_DEFAULT = BASE_DIR / "core" / "sing-box.exe"
 SINGBOX_CLASH_API_PORT = 19090
+SINGBOX_XRAY_RELAY_PORT = 11808
 
 SPEED_TEST_URL = "https://speedtest.selectel.ru/100MB"
 SPEED_TEST_TIMEOUT = 20  # seconds per single measurement

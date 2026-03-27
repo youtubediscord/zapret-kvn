@@ -5,6 +5,25 @@
 This document describes the `sing-box` JSON shape that Zapret KVN actually
 builds today.
 
+## Current Runtime Model
+
+The user-facing product model is now:
+
+- one raw `sing-box.json` editor;
+- that raw config is the source of truth for TUN, routing, DNS, and the main
+  sing-box-side graph;
+- runtime planning patches only app-owned service fragments;
+- if outbound tag `proxy` exists, the selected node may replace only that
+  outbound;
+- if the selected node cannot be rendered as native sing-box outbound
+  (for example Xray `xhttp`), the app keeps the same raw `sing-box.json` as
+  the front config and automatically adds an Xray sidecar only for the proxy
+  path.
+
+This means the older `RoutingSettings`-driven full builder described below is
+legacy architecture context, not the preferred runtime path for the current raw
+editor flow.
+
 It is intentionally narrower than the upstream manual. We only document the
 parts that matter for:
 

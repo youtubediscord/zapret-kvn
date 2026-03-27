@@ -98,10 +98,6 @@ def clean() -> None:
                 _print(f"WARNING: Cannot remove {child}, skipping")
         _print(f"Cleaned {APP_DIR} (data/, core/, zapret/ preserved)")
 
-    spec = ROOT / f"{APP_NAME}.spec"
-    if spec.exists():
-        spec.unlink()
-
 
 def build_exe() -> None:
     ensure_venv()
