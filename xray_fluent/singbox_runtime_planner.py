@@ -121,6 +121,7 @@ def plan_singbox_runtime(
 ) -> SingboxRuntimePlan:
     runtime_config = deepcopy(document.payload)
     _ensure_singbox_metrics_contract(runtime_config)
+    _ensure_singbox_tun_runtime_contract(runtime_config)
 
     outbounds = runtime_config.get("outbounds")
     proxy_index = _find_proxy_outbound_index(outbounds)
@@ -320,6 +321,25 @@ def _ensure_singbox_metrics_contract(payload: dict[str, Any]) -> None:
     clash_api["external_controller"] = f"127.0.0.1:{SINGBOX_CLASH_API_PORT}"
 
 
+def _ensure_singbox_tun_runtime_contract(payload: dict[str, Any]) -> None:
+    """Patch app-owned runtime fields for raw sing-box configs.
+
+    The source document may keep a placeholder or stale interface name, but the
+    runtime launch should always use a fresh xftun-prefixed adapter name. This
+    avoids collisions during reconnect/apply while Windows is still releasing
+    the previous wintun interface.
+    """
+    inbounds = payload.get("inbounds")
+    if not isinstance(inbounds, list):
+        return
+    for inbound in inbounds:
+        if not isinstance(inbound, dict):
+            continue
+        if str(inbound.get("type") or "").strip().lower() != "tun":
+            continue
+        inbound["interface_name"] = _generate_tun_interface_name()
+
+
 def _find_proxy_outbound_index(outbounds: Any) -> int | None:
     if not isinstance(outbounds, list):
         return None
@@ -389,6 +409,10 @@ def _find_free_port(
 def _generate_ss_password(length: int = 24) -> str:
     alphabet = string.ascii_letters + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def _generate_tun_interface_name() -> str:
+    return f"xftun{secrets.token_hex(3)}"
 
 
 def _format_json_error_message(text: str, exc: json.JSONDecodeError) -> str:

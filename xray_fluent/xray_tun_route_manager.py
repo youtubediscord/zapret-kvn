@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from .constants import XRAY_TUN_DEFAULT_INTERFACE_NAME
-from .subprocess_utils import CREATE_NO_WINDOW, result_output_text, run_text, sleep_with_events
+from .subprocess_utils import CREATE_NO_WINDOW, result_output_text, run_text_pumped, sleep_with_events
 
 
 @dataclass(slots=True)
@@ -36,7 +36,7 @@ def get_windows_default_route_context() -> WindowsDefaultRouteContext | None:
         "@{ interface_alias = $route.InterfaceAlias } | ConvertTo-Json -Compress"
     )
     try:
-        result = run_text(
+        result = run_text_pumped(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
             timeout=6,
             creationflags=CREATE_NO_WINDOW,
@@ -188,7 +188,7 @@ class XrayTunRouteManager(QObject):
             "| ConvertTo-Json -Compress"
         )
         try:
-            result = run_text(
+            result = run_text_pumped(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
                 timeout=5,
                 creationflags=CREATE_NO_WINDOW,
@@ -216,7 +216,7 @@ class XrayTunRouteManager(QObject):
         )
 
     def _run_logged(self, command: list[str]):
-        result = run_text(command, timeout=5, creationflags=CREATE_NO_WINDOW)
+        result = run_text_pumped(command, timeout=5, creationflags=CREATE_NO_WINDOW)
         output = result_output_text(result).strip()
         self.log_received.emit(f"[xray-tun] {' '.join(command)} -> rc={result.returncode}")
         if output:

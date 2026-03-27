@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import locale
 import os
 import subprocess
@@ -9,6 +10,7 @@ from typing import Any
 
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+_SUBPROCESS_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="xray_fluent_subprocess")
 
 
 def decode_output(data: bytes | None) -> str:
@@ -49,12 +51,13 @@ def run_text(
 
 def pump_qt_events() -> None:
     try:
+        from PyQt6.QtCore import QThread
         from PyQt6.QtWidgets import QApplication
     except Exception:
         return
 
     app = QApplication.instance()
-    if app is not None:
+    if app is not None and QThread.currentThread() == app.thread():
         app.processEvents()
 
 
@@ -101,6 +104,35 @@ def wait_for_qprocess_ready_read(process: Any, timeout_ms: int) -> bool:
     return _wait_for_qprocess_call(process, "waitForReadyRead", timeout_ms)
 
 
+def wait_for_future_with_events(future: Any, timeout_sec: float, *, slice_sec: float = 0.05) -> Any:
+    deadline = time.monotonic() + max(0.0, float(timeout_sec))
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Future did not complete before timeout")
+        try:
+            return future.result(timeout=min(slice_sec, remaining))
+        except FutureTimeoutError:
+            pump_qt_events()
+
+
+def run_text_pumped(
+    command: list[str],
+    *,
+    timeout: float,
+    check: bool = False,
+    creationflags: int | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    future = _SUBPROCESS_EXECUTOR.submit(
+        run_text,
+        command,
+        timeout=timeout,
+        check=check,
+        creationflags=creationflags,
+    )
+    return wait_for_future_with_events(future, timeout + 0.5)
+
+
 def is_same_path(left: str | Path | None, right: str | Path | None) -> bool:
     if not left or not right:
         return False
@@ -121,7 +153,7 @@ def kill_processes_by_path(process_name: str, executable_path: str | Path, *, ti
         "$matches | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; "
         "Write-Output $matches.Count"
     )
-    result = run_text(
+    result = run_text_pumped(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
         timeout=timeout,
         creationflags=CREATE_NO_WINDOW,

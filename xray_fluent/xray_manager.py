@@ -19,7 +19,7 @@ from .subprocess_utils import (
     decode_output,
     pump_qt_events,
     result_output_text,
-    run_text,
+    run_text_pumped,
     sleep_with_events,
     wait_for_qprocess_finished,
     wait_for_qprocess_started,
@@ -222,7 +222,12 @@ class XrayManager(QObject):
 
     def _find_listening_port_owner(self, port: int) -> tuple[int, str] | None:
         try:
-            result = run_text(["netstat", "-ano", "-p", "tcp"], timeout=5, check=False, creationflags=_CREATE_NO_WINDOW)
+            result = run_text_pumped(
+                ["netstat", "-ano", "-p", "tcp"],
+                timeout=5,
+                check=False,
+                creationflags=_CREATE_NO_WINDOW,
+            )
         except Exception:
             return None
         text = result_output_text(result)
@@ -262,7 +267,7 @@ class XrayManager(QObject):
         if pid <= 0:
             return ""
         try:
-            result = run_text(
+            result = run_text_pumped(
                 ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
                 timeout=5,
                 check=False,
@@ -283,7 +288,7 @@ class XrayManager(QObject):
         if pid <= 0:
             return False
         try:
-            result = run_text(
+            result = run_text_pumped(
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 timeout=5,
                 check=False,
@@ -371,7 +376,7 @@ def get_xray_version(xray_path: str) -> str | None:
     if not exe.exists():
         return None
     try:
-        result = run_text(
+        result = run_text_pumped(
             [str(exe), "version"],
             timeout=3,
             check=False,

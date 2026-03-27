@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+from collections import deque
 import json
 import os
-import subprocess
-import time
 from pathlib import Path
 from typing import Any
 
@@ -17,10 +16,9 @@ from .subprocess_utils import (
     decode_output,
     kill_processes_by_path,
     result_output_text,
-    run_text,
+    run_text_pumped,
     sleep_with_events,
     wait_for_qprocess_finished,
-    wait_for_qprocess_ready_read,
     wait_for_qprocess_started,
 )
 
@@ -41,7 +39,13 @@ class SingBoxManager(QObject):
         self._process.errorOccurred.connect(self._on_error)
         self._process.finished.connect(self._on_finished)
         self._running = False
+        self._starting = False
         self._stop_requested = False
+        self._startup_failure_reported = False
+        self._runtime_error_reported = False
+        self._last_output_lines: deque[str] = deque(maxlen=20)
+        self._last_exit_code: int | None = None
+        self._last_exit_status = QProcess.ExitStatus.NormalExit
 
     @property
     def is_running(self) -> bool:
@@ -59,6 +63,11 @@ class SingBoxManager(QObject):
             return False
         if not exe.is_file():
             self.error.emit(f"sing-box.exe not found: {exe}")
+            return False
+
+        tun_interface_name = self._extract_tun_interface_name(config)
+        if not tun_interface_name:
+            self.error.emit("sing-box config does not contain a TUN inbound interface_name")
             return False
 
         RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
@@ -82,32 +91,51 @@ class SingBoxManager(QObject):
 
         # Set working directory to core/ so sing-box can find wintun.dll
         core_dir = exe.parent
+        self._starting = True
+        self._startup_failure_reported = False
+        self._runtime_error_reported = False
+        self._last_output_lines.clear()
 
         # Try up to 3 times — wintun adapter may need time to be released
         for attempt in range(3):
+            self._last_output_lines.clear()
             self._process.setWorkingDirectory(str(core_dir))
             self._process.setProgram(str(exe))
             self._process.setArguments(["run", "-c", str(SINGBOX_CONFIG_FILE), "-D", str(core_dir)])
             self._process.start()
 
             if not wait_for_qprocess_started(self._process, 4000):
-                self.error.emit(f"failed to start sing-box process: {self._process.errorString()}")
+                self._starting = False
+                self._report_startup_failure(f"failed to start sing-box process: {self._process.errorString()}")
                 return False
 
-            # TUN adapter creation can take several seconds — wait for output
-            wait_for_qprocess_ready_read(self._process, 5000)
-            # Brief pause to let FATAL errors surface
-            sleep_with_events(0.3)
-            if self._process.state() == QProcess.ProcessState.NotRunning:
-                # "file already exists" — wait for TUN release and retry
-                if attempt < 2:
-                    self._wait_tun_released()
-                    continue
-                self.error.emit("sing-box process exited right after start")
-                return False
+            if self._wait_until_tun_ready(tun_interface_name):
+                self._starting = False
+                self._mark_running()
+                return True
 
-            return True
+            exited = self._process.state() == QProcess.ProcessState.NotRunning
+            retryable = exited and self._startup_error_is_retryable()
+            if not exited:
+                self.stop(expected=True)
 
+            if retryable and attempt < 2:
+                self._wait_tun_released()
+                self._starting = True
+                continue
+
+            self._starting = False
+            if exited:
+                self._report_startup_failure(
+                    self._unexpected_exit_message(self._last_exit_code, self._last_exit_status, startup=True)
+                )
+            else:
+                self._report_startup_failure(
+                    f"sing-box started but TUN interface '{tun_interface_name}' did not become ready in time"
+                )
+            return False
+
+        self._starting = False
         return False
 
     @staticmethod
@@ -127,6 +155,7 @@ class SingBoxManager(QObject):
             if self._running:
                 self._running = False
                 self.state_changed.emit(False)
+            self._starting = False
             return True
 
         self._stop_requested = expected
@@ -141,6 +170,7 @@ class SingBoxManager(QObject):
             return False
 
         # Wait for TUN adapter to be released by OS (active polling)
+        self._starting = False
         self._wait_tun_released()
         return True
 
@@ -153,7 +183,7 @@ class SingBoxManager(QObject):
         waited = 0.0
         while waited < max_wait:
             try:
-                result = run_text(
+                result = run_text_pumped(
                     ["netsh", "interface", "show", "interface"],
                     timeout=3,
                     creationflags=_CREATE_NO_WINDOW,
@@ -176,25 +206,123 @@ class SingBoxManager(QObject):
         for line in text.splitlines():
             clean = line.rstrip()
             if clean:
+                self._last_output_lines.append(clean)
                 self.log_received.emit(clean)
 
     def _on_started(self) -> None:
         self._stop_requested = False
-        self._running = True
-        self.started.emit()
-        self.state_changed.emit(True)
 
     def _on_error(self, process_error: QProcess.ProcessError) -> None:
         if self._stop_requested and process_error == QProcess.ProcessError.Crashed:
             return
         message = f"sing-box process error: {process_error.name} ({self._process.errorString()})"
+        if self._starting:
+            self._report_startup_failure(message)
+            return
+        if self._runtime_error_reported:
+            return
+        self._runtime_error_reported = True
         self.error.emit(message)
 
     def _on_finished(self, exit_code: int, _exit_status: int = 0) -> None:
+        exit_status = QProcess.ExitStatus(_exit_status)
+        expected = self._stop_requested
+        self._last_exit_code = exit_code
+        self._last_exit_status = exit_status
         self._stop_requested = False
+        was_running = self._running
         self._running = False
+        if self._starting and not expected:
+            self._report_startup_failure(self._unexpected_exit_message(exit_code, exit_status, startup=True))
+        elif was_running and not expected and not self._runtime_error_reported:
+            self._runtime_error_reported = True
+            self.error.emit(self._unexpected_exit_message(exit_code, exit_status, startup=False))
+        self._starting = False
         self.stopped.emit(exit_code)
-        self.state_changed.emit(False)
+        if was_running:
+            self.state_changed.emit(False)
+
+    def _mark_running(self) -> None:
+        if self._running:
+            return
+        self._stop_requested = False
+        self._running = True
+        self.started.emit()
+        self.state_changed.emit(True)
+
+    @staticmethod
+    def _extract_tun_interface_name(config: dict[str, Any]) -> str:
+        for inbound in config.get("inbounds") or []:
+            if not isinstance(inbound, dict):
+                continue
+            if str(inbound.get("type") or "").strip().lower() != "tun":
+                continue
+            return str(inbound.get("interface_name") or "").strip()
+        return ""
+
+    def _wait_until_tun_ready(self, tun_interface_name: str, max_wait: float = 18.0) -> bool:
+        if os.name != "nt" or not tun_interface_name:
+            return True
+        step = 0.25
+        waited = 0.0
+        while waited < max_wait:
+            if self._process.state() == QProcess.ProcessState.NotRunning:
+                return False
+            if self._tun_interface_has_ipv4(tun_interface_name):
+                return True
+            sleep_with_events(step)
+            waited += step
+        return False
+
+    @staticmethod
+    def _tun_interface_has_ipv4(tun_interface_name: str) -> bool:
+        escaped_name = tun_interface_name.replace("'", "''")
+        script = (
+            f"$ipv4 = Get-NetIPAddress -InterfaceAlias '{escaped_name}' -AddressFamily IPv4 -ErrorAction SilentlyContinue "
+            "| Where-Object { $_.IPAddress -and $_.IPAddress -ne '0.0.0.0' } "
+            "| Select-Object -First 1 IPAddress; "
+            "if ($ipv4) { exit 0 } else { exit 1 }"
+        )
+        try:
+            result = run_text_pumped(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                timeout=4,
+                check=False,
+                creationflags=_CREATE_NO_WINDOW,
+            )
+        except Exception:
+            return False
+        return result.returncode == 0
+
+    def _startup_error_is_retryable(self) -> bool:
+        needles = ("already exists", "cannot create a file when that file already exists")
+        for line in self._last_output_lines:
+            text = line.lower()
+            if any(needle in text for needle in needles):
+                return True
+        return False
+
+    def _unexpected_exit_message(
+        self,
+        exit_code: int | None,
+        exit_status: QProcess.ExitStatus,
+        *,
+        startup: bool,
+    ) -> str:
+        stage = "during startup" if startup else "unexpectedly"
+        detail = self._last_output_lines[-1].strip() if self._last_output_lines else ""
+        if detail:
+            return f"sing-box exited {stage}: {detail}"
+        if exit_code is None:
+            return f"sing-box exited {stage}."
+        status_name = "CrashExit" if exit_status == QProcess.ExitStatus.CrashExit else "NormalExit"
+        return f"sing-box exited {stage} with code {exit_code} ({status_name})."
+
+    def _report_startup_failure(self, message: str) -> None:
+        if self._startup_failure_reported:
+            return
+        self._startup_failure_reported = True
+        self.error.emit(message)
 
 
 def get_singbox_version(singbox_path: str) -> str | None:
@@ -209,7 +337,7 @@ def get_singbox_version(singbox_path: str) -> str | None:
     if not exe.exists():
         return None
     try:
-        result = run_text(
+        result = run_text_pumped(
             [str(exe), "version"],
             timeout=3,
             check=False,

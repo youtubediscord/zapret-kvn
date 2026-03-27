@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
-import time
-from pathlib import Path
 from typing import Any
 
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -15,7 +12,7 @@ from .subprocess_utils import (
     decode_output,
     kill_processes_by_path,
     result_output_text,
-    run_text,
+    run_text_pumped,
     sleep_with_events,
     wait_for_qprocess_finished,
     wait_for_qprocess_ready_read,
@@ -96,7 +93,7 @@ class Tun2SocksManager(QObject):
 
         # Wait until TUN interface appears (up to 10 seconds)
         for _ in range(20):
-            result = run_text(
+            result = run_text_pumped(
                 ["netsh", "interface", "ipv4", "show", "interfaces"],
                 timeout=5,
                 creationflags=_CREATE_NO_WINDOW,
@@ -150,7 +147,7 @@ class Tun2SocksManager(QObject):
         try:
             self._helper_routes = []
             # Find TUN interface index by name
-            result = run_text(
+            result = run_text_pumped(
                 ["netsh", "interface", "ipv4", "show", "interfaces"],
                 timeout=5,
                 creationflags=_CREATE_NO_WINDOW,
@@ -167,7 +164,7 @@ class Tun2SocksManager(QObject):
                 return False
 
             # Get current default gateway
-            result = run_text(
+            result = run_text_pumped(
                 ["cmd", "/c", "route", "print", "0.0.0.0"],
                 timeout=5,
                 creationflags=_CREATE_NO_WINDOW,
@@ -185,9 +182,10 @@ class Tun2SocksManager(QObject):
             self._tun_idx = tun_idx
 
             # Set TUN interface metric very low so it wins
-            subprocess.run(
+            run_text_pumped(
                 ["netsh", "interface", "ipv4", "set", "interface", tun_idx, "metric=1"],
-                capture_output=True, timeout=5, creationflags=_CREATE_NO_WINDOW,
+                timeout=5,
+                creationflags=_CREATE_NO_WINDOW,
             )
 
             cmds: list[list[str]] = []
@@ -217,7 +215,7 @@ class Tun2SocksManager(QObject):
             for destination, mask, gateway in self._helper_routes:
                 cleanup_cmds.append(["route", "delete", destination, "mask", mask, gateway])
             for cmd in cleanup_cmds:
-                subprocess.run(cmd, capture_output=True, timeout=5, creationflags=_CREATE_NO_WINDOW)
+                run_text_pumped(cmd, timeout=5, creationflags=_CREATE_NO_WINDOW)
 
             # Use netsh to add TUN routes — this correctly sets interface metric
             cmds += [
@@ -226,7 +224,7 @@ class Tun2SocksManager(QObject):
                 ["netsh", "interface", "ipv6", "add", "route", "::/0", f"interface={tun_idx}", "metric=1"],
             ]
             for cmd in cmds:
-                r = run_text(cmd, timeout=5, creationflags=_CREATE_NO_WINDOW)
+                r = run_text_pumped(cmd, timeout=5, creationflags=_CREATE_NO_WINDOW)
                 self.log_received.emit(f"[tun2socks] {' '.join(cmd)} -> rc={r.returncode}")
                 if r.returncode != 0:
                     details = result_output_text(r).strip()
@@ -261,7 +259,7 @@ class Tun2SocksManager(QObject):
             for destination, mask, gateway in self._helper_routes:
                 cmds.append(["route", "delete", destination, "mask", mask, gateway])
             for cmd in cmds:
-                subprocess.run(cmd, capture_output=True, timeout=5, creationflags=_CREATE_NO_WINDOW)
+                run_text_pumped(cmd, timeout=5, creationflags=_CREATE_NO_WINDOW)
             self._helper_routes = []
         except Exception:
             pass
