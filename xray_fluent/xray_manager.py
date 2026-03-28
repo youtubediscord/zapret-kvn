@@ -7,6 +7,7 @@ import socket
 import subprocess
 import time
 from collections import deque
+from pathlib import Path
 from typing import Any
 
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -17,6 +18,7 @@ from .constants import RUNTIME_DIR, XRAY_CONFIG_FILE, XRAY_PATH_DEFAULT
 from .path_utils import resolve_configured_path
 from .subprocess_utils import (
     decode_output,
+    kill_processes_by_path,
     pump_qt_events,
     result_output_text,
     run_text_pumped,
@@ -50,6 +52,7 @@ class XrayManager(QObject):
         self._last_exit_code: int | None = None
         self._last_exit_status = QProcess.ExitStatus.NormalExit
         self._last_exit_expected = False
+        self._exe_path: Path | None = None
 
     @property
     def is_running(self) -> bool:
@@ -75,6 +78,7 @@ class XrayManager(QObject):
         if not exe.is_file():
             self.error.emit(f"xray.exe не найден: {exe}")
             return False
+        self._exe_path = exe
 
         if self._process.state() != QProcess.ProcessState.NotRunning:
             if not self.stop(expected=True):
@@ -124,12 +128,22 @@ class XrayManager(QObject):
 
         self._stop_requested = expected
         self._process.terminate()
-        if wait_for_qprocess_finished(self._process, 600):
+        if wait_for_qprocess_finished(self._process, 3000):
             return True
 
         self._process.kill()
-        if wait_for_qprocess_finished(self._process, 200):
+        if wait_for_qprocess_finished(self._process, 2000):
             return True
+
+        exe = self._exe_path
+        if os.name == "nt" and exe is not None:
+            try:
+                if kill_processes_by_path(exe.name, exe, timeout=5):
+                    sleep_with_events(0.5)
+                    if wait_for_qprocess_finished(self._process, 1000):
+                        return True
+            except Exception:
+                pass
 
         if self._process.state() == QProcess.ProcessState.NotRunning:
             return True
