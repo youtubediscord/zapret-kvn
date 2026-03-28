@@ -59,6 +59,30 @@ def _first(query: dict[str, list[str]], key: str, default: str = "") -> str:
     return values[0]
 
 
+def _get_param(params: dict[str, str], *keys: str, default: str = "") -> str:
+    empty_value: str | None = None
+    for key in keys:
+        if key in params:
+            value = params[key]
+            if value:
+                return value
+            if empty_value is None:
+                empty_value = value
+
+    lower_params = {str(key).lower(): value for key, value in params.items()}
+    for key in keys:
+        lowered = str(key).lower()
+        if lowered in lower_params:
+            value = lower_params[lowered]
+            if value:
+                return value
+            if empty_value is None:
+                empty_value = value
+    if empty_value is not None:
+        return empty_value
+    return default
+
+
 def _decode_b64(data: str) -> str:
     data = data.strip()
     data += "=" * ((4 - len(data) % 4) % 4)
@@ -79,9 +103,9 @@ def _to_bool(value: str) -> bool:
 
 
 def _build_stream_settings(params: dict[str, str], default_network: str = "tcp", default_security: str = "none") -> dict[str, Any]:
-    network = (params.get("type") or params.get("net") or default_network or "tcp").lower()
-    security = (params.get("security") or params.get("tls") or default_security or "none").lower()
-    if security == "none" and params.get("tls") == "tls":
+    network = (_get_param(params, "type", "net", default=default_network or "tcp") or "tcp").lower()
+    security = (_get_param(params, "security", "tls", default=default_security or "none") or "none").lower()
+    if security == "none" and _get_param(params, "tls") == "tls":
         security = "tls"
 
     stream: dict[str, Any] = {
@@ -89,8 +113,8 @@ def _build_stream_settings(params: dict[str, str], default_network: str = "tcp",
         "security": security,
     }
 
-    host = params.get("host")
-    path = params.get("path")
+    host = _get_param(params, "host")
+    path = _get_param(params, "path")
 
     if network == "ws":
         ws_settings: dict[str, Any] = {}
@@ -108,56 +132,57 @@ def _build_stream_settings(params: dict[str, str], default_network: str = "tcp",
         stream["httpSettings"] = http_settings
     elif network == "grpc":
         grpc_settings: dict[str, Any] = {}
-        service_name = params.get("serviceName")
+        service_name = _get_param(params, "serviceName", "service_name")
         if service_name:
             grpc_settings["serviceName"] = service_name
-        authority = params.get("authority")
+        authority = _get_param(params, "authority")
         if authority:
             grpc_settings["authority"] = authority
-        mode = params.get("mode")
+        mode = _get_param(params, "mode")
         if mode == "multi":
             grpc_settings["multiMode"] = True
         stream["grpcSettings"] = grpc_settings
     elif network == "quic":
         stream["quicSettings"] = {
-            "security": params.get("quicSecurity") or "none",
-            "key": params.get("key") or "",
-            "header": {"type": params.get("headerType") or "none"},
+            "security": _get_param(params, "quicSecurity", "quic_security") or "none",
+            "key": _get_param(params, "key") or "",
+            "header": {"type": _get_param(params, "headerType", "header_type") or "none"},
         }
     elif network == "kcp":
         stream["kcpSettings"] = {
-            "header": {"type": params.get("headerType") or "none"},
+            "header": {"type": _get_param(params, "headerType", "header_type") or "none"},
         }
 
     if security == "tls":
         tls_settings: dict[str, Any] = {}
-        sni = params.get("sni")
+        sni = _get_param(params, "sni", "serverName", "server_name")
         if sni:
             tls_settings["serverName"] = sni
-        alpn = params.get("alpn")
+        alpn = _get_param(params, "alpn")
         if alpn:
             tls_settings["alpn"] = [item.strip() for item in alpn.split(",") if item.strip()]
-        fp = params.get("fp")
+        fp = _get_param(params, "fp", "fingerprint")
         if fp:
             tls_settings["fingerprint"] = fp
-        if "allowInsecure" in params:
-            tls_settings["allowInsecure"] = _to_bool(params.get("allowInsecure", "false"))
+        allow_insecure = _get_param(params, "allowInsecure", "allow_insecure")
+        if allow_insecure:
+            tls_settings["allowInsecure"] = _to_bool(allow_insecure)
         stream["tlsSettings"] = tls_settings
     elif security == "reality":
         reality_settings: dict[str, Any] = {}
-        sni = params.get("sni")
+        sni = _get_param(params, "sni", "serverName", "server_name")
         if sni:
             reality_settings["serverName"] = sni
-        fp = params.get("fp")
+        fp = _get_param(params, "fp", "fingerprint")
         if fp:
             reality_settings["fingerprint"] = fp
-        pbk = params.get("pbk")
+        pbk = _get_param(params, "pbk", "publicKey", "public_key", "password")
         if pbk:
             reality_settings["publicKey"] = pbk
-        sid = params.get("sid")
+        sid = _get_param(params, "sid", "shortId", "short_id")
         if sid:
             reality_settings["shortId"] = sid
-        spx = params.get("spx")
+        spx = _get_param(params, "spx", "spiderX", "spider_x")
         if spx:
             reality_settings["spiderX"] = spx
         stream["realitySettings"] = reality_settings
@@ -179,9 +204,9 @@ def _parse_vless(link: str) -> Node:
 
     user: dict[str, Any] = {
         "id": user_id,
-        "encryption": params.get("encryption") or "none",
+        "encryption": _get_param(params, "encryption") or "none",
     }
-    flow = params.get("flow")
+    flow = _get_param(params, "flow")
     if flow:
         user["flow"] = flow
 
@@ -207,6 +232,51 @@ def _parse_vless(link: str) -> Node:
         port=port,
         link=link,
         outbound=outbound,
+    )
+
+
+def repair_node_outbound_from_link(node: Node) -> bool:
+    link = str(node.link or "").strip()
+    if not link:
+        return False
+    try:
+        reparsed = parse_single(link)
+    except Exception:
+        return False
+    if reparsed.outbound == node.outbound:
+        return False
+    node.outbound = reparsed.outbound
+    if not node.scheme:
+        node.scheme = reparsed.scheme
+    if not node.server:
+        node.server = reparsed.server
+    if node.port <= 0:
+        node.port = reparsed.port
+    return True
+
+
+def validate_node_outbound(node: Node) -> str | None:
+    outbound = node.outbound if isinstance(node.outbound, dict) else {}
+    stream_settings = outbound.get("streamSettings") if isinstance(outbound, dict) else None
+    if not isinstance(stream_settings, dict):
+        return None
+
+    security = str(stream_settings.get("security") or "").strip().lower()
+    if security != "reality":
+        return None
+
+    reality_settings = stream_settings.get("realitySettings")
+    if not isinstance(reality_settings, dict):
+        reality_settings = {}
+
+    public_key = str(reality_settings.get("publicKey") or "").strip()
+    if public_key:
+        return None
+
+    node_name = str(node.name or node.server or "безымянный сервер").strip()
+    return (
+        f"Сервер {node_name} не может быть запущен: для REALITY обязателен publicKey "
+        "(параметр pbk в VLESS-ссылке), но в этой ссылке он пустой или отсутствует."
     )
 
 

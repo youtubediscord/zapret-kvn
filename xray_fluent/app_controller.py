@@ -43,7 +43,7 @@ from .constants import (
     XRAY_TEMPLATES_DIR,
 )
 from .diagnostics import export_diagnostics
-from .link_parser import parse_links_text
+from .link_parser import parse_links_text, repair_node_outbound_from_link, validate_node_outbound
 from .live_metrics_worker import LiveMetricsWorker
 from .models import AppSettings, AppState, Node, RoutingSettings
 from .network_monitor import NetworkMonitor
@@ -1334,6 +1334,9 @@ class AppController(QObject):
                 has_proxy_outbound = True
                 if node is None:
                     raise ValueError("В конфиге есть outbound tag `proxy`. Выберите сервер для запуска xray.")
+                problem = self._prepare_node_for_runtime(node)
+                if problem:
+                    raise ValueError(problem)
                 proxy_outbound = deepcopy(node.outbound)
                 proxy_outbound["tag"] = "proxy"
                 outbounds[index] = proxy_outbound
@@ -1873,6 +1876,13 @@ class AppController(QObject):
                 return node
         return None
 
+    def _prepare_node_for_runtime(self, node: Node | None) -> str | None:
+        if node is None:
+            return None
+        if repair_node_outbound_from_link(node):
+            self.schedule_save()
+        return validate_node_outbound(node)
+
     def export_node_outbound_json(self, node_id: str | None = None) -> str | None:
         node = self._get_node_by_id(node_id) if node_id else self.selected_node
         if not node:
@@ -1889,6 +1899,9 @@ class AppController(QObject):
                 runtime = self._build_runtime_xray_config(node, tun_mode=self.is_xray_tun_mode())
                 return json.dumps(runtime.config, ensure_ascii=True, indent=2)
             if not node:
+                return None
+            problem = self._prepare_node_for_runtime(node)
+            if problem:
                 return None
             cfg = build_xray_config(
                 node,
@@ -1911,6 +1924,10 @@ class AppController(QObject):
         first_new_id: str | None = None
         added = 0
         for node in nodes:
+            problem = validate_node_outbound(node)
+            if problem:
+                errors.append(problem)
+                continue
             if node.link in existing_links:
                 continue
             if not node.country_code:
@@ -2203,6 +2220,12 @@ class AppController(QObject):
                 session_label = node.name if node else self.get_active_xray_config_name()
             else:
                 session_label = node.name if node else "unknown"
+
+            if node is not None and not singbox_editor_mode and not xray_raw_mode:
+                problem = self._prepare_node_for_runtime(node)
+                if problem:
+                    self._set_connection_status("error", problem, level="error")
+                    return False
 
             if tun:
                 self._log(f"[tun] attempting TUN connect, admin={_is_admin()}")
@@ -3195,6 +3218,10 @@ class AppController(QObject):
         if self._active_core == "tun2socks":
             self._switching = True
             try:
+                problem = self._prepare_node_for_runtime(node)
+                if problem:
+                    self._set_connection_status("error", problem, level="error")
+                    return False
                 self._log(f"[hot-swap] {reason} — restarting xray only, tun2socks stays up")
                 self._set_connection_status("starting", f"Переключение на {node.name}...", level="info")
                 self.xray.stop()
