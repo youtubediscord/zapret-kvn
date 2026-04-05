@@ -165,6 +165,7 @@ class AppSettings:
     accent_color: str = "#0078D4"
     auto_connect_last: bool = True
     start_minimized: bool = False
+    launch_in_tray: bool = True
     enable_system_proxy: bool = True
     system_proxy_bypass_lan: bool = True
     launch_on_startup: bool = False
@@ -202,6 +203,7 @@ class AppSettings:
             "accent_color": self.accent_color,
             "auto_connect_last": self.auto_connect_last,
             "start_minimized": self.start_minimized,
+            "launch_in_tray": self.launch_in_tray,
             "enable_system_proxy": self.enable_system_proxy,
             "system_proxy_bypass_lan": self.system_proxy_bypass_lan,
             "launch_on_startup": self.launch_on_startup,
@@ -241,6 +243,7 @@ class AppSettings:
             accent_color=str(data.get("accent_color") or "#0078D4"),
             auto_connect_last=bool(data.get("auto_connect_last", True)),
             start_minimized=bool(data.get("start_minimized", False)),
+            launch_in_tray=bool(data.get("launch_in_tray", True)),
             enable_system_proxy=bool(data.get("enable_system_proxy", True)),
             system_proxy_bypass_lan=bool(data.get("system_proxy_bypass_lan", True)),
             launch_on_startup=bool(data.get("launch_on_startup", False)),

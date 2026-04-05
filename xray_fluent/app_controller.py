@@ -2624,15 +2624,20 @@ class AppController(QObject):
     def update_settings(self, settings: AppSettings) -> None:
         old_settings = self.state.settings
         old_launch = old_settings.launch_on_startup
+        old_launch_in_tray = old_settings.launch_in_tray
         old_tun = old_settings.tun_mode
         old_tun_engine = old_settings.tun_engine
         self.state.settings = settings
         self.settings_changed.emit(self.state.settings)
         self.schedule_save()
 
-        if old_launch != settings.launch_on_startup:
+        if old_launch != settings.launch_on_startup or old_launch_in_tray != settings.launch_in_tray:
             try:
-                set_startup_enabled(APP_NAME, settings.launch_on_startup, build_startup_command())
+                set_startup_enabled(
+                    APP_NAME,
+                    settings.launch_on_startup,
+                    build_startup_command(settings.launch_in_tray),
+                )
             except Exception as exc:
                 self.status.emit("error", f"Ошибка настройки автозапуска: {exc}")
 

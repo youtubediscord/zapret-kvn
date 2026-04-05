@@ -92,13 +92,13 @@ def set_startup_enabled(app_name: str, enabled: bool, command: str) -> None:
         _run_schtasks(["/Delete", "/F", "/TN", task_name])
 
 
-def build_startup_command() -> str:
+def build_startup_command(start_in_tray: bool = True) -> str:
     if getattr(sys, "frozen", False):
         exe = Path(sys.executable).resolve()
-        return f'"{exe}" --tray'
+        return f'"{exe}" --tray' if start_in_tray else f'"{exe}"'
 
     base_dir = Path(__file__).resolve().parents[1]
     script = base_dir / "main.py"
     venv_pythonw = base_dir / ".venv" / "Scripts" / "pythonw.exe"
     python_exe = venv_pythonw if venv_pythonw.exists() else Path(sys.executable).resolve()
-    return f'"{python_exe}" "{script}" --tray'
+    return f'"{python_exe}" "{script}" --tray' if start_in_tray else f'"{python_exe}" "{script}"'

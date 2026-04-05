@@ -258,8 +258,14 @@ class SettingsPage(QWidget):
             "Автоматически запускать приложение в трее при входе в систему",
             parent=startup_group,
         )
+        self.launch_in_tray_card = SwitchSettingCard(
+            FIF.MINIMIZE, "Запуск в свёрнутом виде",
+            "При автозапуске сразу открывать приложение в трее",
+            parent=startup_group,
+        )
 
         startup_group.addSettingCard(self.launch_card)
+        startup_group.addSettingCard(self.launch_in_tray_card)
         root.addWidget(startup_group)
 
         # ============================================================
@@ -371,6 +377,7 @@ class SettingsPage(QWidget):
         self.tun_engine_card.combo.currentIndexChanged.connect(self._auto_save)
 
         self.launch_card.checkedChanged.connect(self._auto_save)
+        self.launch_in_tray_card.checkedChanged.connect(self._auto_save)
         self.reconnect_card.checkedChanged.connect(self._auto_save)
         self.check_updates_card.checkedChanged.connect(self._auto_save)
         self.allow_updates_card.checkedChanged.connect(self._auto_save)
@@ -414,6 +421,7 @@ class SettingsPage(QWidget):
         tun_engine_value = "xray" if settings.tun_engine == "tun2socks" else settings.tun_engine
         self._select_combo_data(self.tun_engine_card.combo, tun_engine_value)
         self.launch_card.setChecked(settings.launch_on_startup)
+        self.launch_in_tray_card.setChecked(settings.launch_in_tray)
         self.reconnect_card.setChecked(settings.reconnect_on_network_change)
         self.check_updates_card.setChecked(settings.check_updates)
         self.allow_updates_card.setChecked(settings.allow_updates)
@@ -505,6 +513,7 @@ class SettingsPage(QWidget):
         data.tun_engine = self.tun_engine_card.combo.currentData() or "singbox"
         data.start_minimized = False
         data.launch_on_startup = self.launch_card.isChecked()
+        data.launch_in_tray = self.launch_in_tray_card.isChecked()
         data.reconnect_on_network_change = self.reconnect_card.isChecked()
         data.check_updates = self.check_updates_card.isChecked()
         data.allow_updates = self.allow_updates_card.isChecked()
