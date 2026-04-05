@@ -62,7 +62,7 @@ Zapret KVN объединяет несколько проверенных инс
 
 ## Установка
 
-1. Скачайте установщик со страницы [Releases](https://github.com/youtubediscord/zapret-kvn/releases)
+1. Скачайте установщик со страницы [Releases](https://github.com/DonaK200097/zapret-kvn-fix/releases)
 2. Запустите скачанный `.exe` — он распакует программу в выбранную папку
 3. Запустите `ZapretRe-KVN.exe` из этой папки
 
