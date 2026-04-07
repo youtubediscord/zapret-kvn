@@ -32,7 +32,33 @@
   ],
   "route": {
     "auto_detect_interface": true,
+    "rule_set": [
+      {
+        "type": "remote",
+        "tag": "geosite-category-ru",
+        "format": "binary",
+        "url": "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geosite/geosite-category-ru.srs",
+        "download_detour": "proxy",
+        "update_interval": "24h"
+      },
+      {
+        "type": "remote",
+        "tag": "geoip-ru",
+        "format": "binary",
+        "url": "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geoip/geoip-ru.srs",
+        "download_detour": "proxy",
+        "update_interval": "24h"
+      }
+    ],
     "rules": [
+      {
+        "rule_set": [
+          "geosite-category-ru",
+          "geoip-ru"
+        ],
+        "action": "route",
+        "outbound": "direct"
+      },
       {
         "process_path_regex": [
           "(?i)^[A-Z]:\\\\Users\\\\[^\\\\]+\\\\AppData\\\\Local\\\\Discord\\\\.*(?:Discord|Update)\\.exe$"
@@ -57,5 +83,10 @@
       }
     ],
     "final": "direct"
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true
+    }
   }
 }

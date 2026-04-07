@@ -65,6 +65,68 @@ def default_singbox_config_text() -> str:
         ],
         "route": {"auto_detect_interface": True, "final": "direct"},
     }
+    route = payload["route"]
+    assert isinstance(route, dict)
+    route["rule_set"] = [
+        {
+            "type": "remote",
+            "tag": "geosite-category-ru",
+            "format": "binary",
+            "url": "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geosite/geosite-category-ru.srs",
+            "download_detour": "proxy",
+            "update_interval": "24h",
+        },
+        {
+            "type": "remote",
+            "tag": "geoip-ru",
+            "format": "binary",
+            "url": "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geoip/geoip-ru.srs",
+            "download_detour": "proxy",
+            "update_interval": "24h",
+        },
+    ]
+    route["rules"] = [
+        {
+            "action": "sniff",
+        },
+        {
+            "protocol": "dns",
+            "action": "hijack-dns",
+        },
+        {
+            "rule_set": ["geosite-category-ru", "geoip-ru"],
+            "action": "route",
+            "outbound": "direct",
+        },
+    ]
+    payload["dns"] = {
+        "servers": [
+            {
+                "tag": "bootstrap-dns",
+                "type": "udp",
+                "server": "1.1.1.1",
+            },
+            {
+                "tag": "proxy-dns",
+                "type": "tcp",
+                "server": "8.8.8.8",
+                "detour": "proxy",
+            },
+        ],
+        "rules": [
+            {
+                "rule_set": ["geosite-category-ru"],
+                "action": "route",
+                "server": "bootstrap-dns",
+            }
+        ],
+        "final": "proxy-dns",
+    }
+    payload["experimental"] = {
+        "cache_file": {
+            "enabled": True,
+        }
+    }
     return json.dumps(payload, ensure_ascii=True, indent=2) + "\n"
 
 
@@ -122,6 +184,30 @@ def default_xray_config_text(
             "domainStrategy": "AsIs",
             "rules": [
                 {"type": "field", "inboundTag": ["api"], "outboundTag": "api"},
+                {
+                    "type": "field",
+                    "ip": ["geoip:private"],
+                    "network": "tcp,udp",
+                    "outboundTag": "direct",
+                },
+                {
+                    "type": "field",
+                    "domain": ["geosite:private"],
+                    "network": "tcp,udp",
+                    "outboundTag": "direct",
+                },
+                {
+                    "type": "field",
+                    "domain": ["geosite:category-ru"],
+                    "network": "tcp,udp",
+                    "outboundTag": "direct",
+                },
+                {
+                    "type": "field",
+                    "ip": ["geoip:ru"],
+                    "network": "tcp,udp",
+                    "outboundTag": "direct",
+                },
                 {"type": "field", "network": "tcp,udp", "outboundTag": "direct"},
             ],
         },
