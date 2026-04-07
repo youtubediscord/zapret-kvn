@@ -3,6 +3,20 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ..constants import (
+    SINGBOX_DEFAULT_CONFIG_NAME,
+    SINGBOX_TEMPLATES_DIR,
+    XRAY_DEFAULT_CONFIG_NAME,
+    XRAY_TEMPLATES_DIR,
+)
+
+
+def _read_default_template_text(base_dir: Path, default_name: str, *, label: str) -> str:
+    path = (base_dir / default_name).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Не найден шаблон {label}: {path}")
+    return path.read_text(encoding="utf-8")
+
 
 def normalize_relative_json_path(value: str | Path | None, default_name: str) -> str:
     raw = str(value or "").strip().replace("\\", "/")
@@ -45,89 +59,7 @@ def resolve_profile_path(
 
 
 def default_singbox_config_text() -> str:
-    payload = {
-        "log": {"level": "warn", "timestamp": True},
-        "inbounds": [
-            {
-                "type": "tun",
-                "tag": "tun-in",
-                "interface_name": "xftun",
-                "address": ["172.19.0.1/30"],
-                "auto_route": True,
-                "strict_route": False,
-                "stack": "mixed",
-            }
-        ],
-        "outbounds": [
-            {"type": "direct", "tag": "proxy"},
-            {"type": "direct", "tag": "direct"},
-            {"type": "block", "tag": "block"},
-        ],
-        "route": {"auto_detect_interface": True, "final": "direct"},
-    }
-    route = payload["route"]
-    assert isinstance(route, dict)
-    route["rule_set"] = [
-        {
-            "type": "remote",
-            "tag": "geosite-category-ru",
-            "format": "binary",
-            "url": "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geosite/geosite-category-ru.srs",
-            "download_detour": "proxy",
-            "update_interval": "24h",
-        },
-        {
-            "type": "remote",
-            "tag": "geoip-ru",
-            "format": "binary",
-            "url": "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geoip/geoip-ru.srs",
-            "download_detour": "proxy",
-            "update_interval": "24h",
-        },
-    ]
-    route["rules"] = [
-        {
-            "action": "sniff",
-        },
-        {
-            "protocol": "dns",
-            "action": "hijack-dns",
-        },
-        {
-            "rule_set": ["geosite-category-ru", "geoip-ru"],
-            "action": "route",
-            "outbound": "direct",
-        },
-    ]
-    payload["dns"] = {
-        "servers": [
-            {
-                "tag": "bootstrap-dns",
-                "type": "udp",
-                "server": "1.1.1.1",
-            },
-            {
-                "tag": "proxy-dns",
-                "type": "tcp",
-                "server": "8.8.8.8",
-                "detour": "proxy",
-            },
-        ],
-        "rules": [
-            {
-                "rule_set": ["geosite-category-ru"],
-                "action": "route",
-                "server": "bootstrap-dns",
-            }
-        ],
-        "final": "proxy-dns",
-    }
-    payload["experimental"] = {
-        "cache_file": {
-            "enabled": True,
-        }
-    }
-    return json.dumps(payload, ensure_ascii=True, indent=2) + "\n"
+    return _read_default_template_text(SINGBOX_TEMPLATES_DIR, SINGBOX_DEFAULT_CONFIG_NAME, label="sing-box")
 
 
 def default_xray_config_text(
@@ -137,82 +69,7 @@ def default_xray_config_text(
     http_port: int,
     api_port: int,
 ) -> str:
-    payload = {
-        "log": {"loglevel": "warning"},
-        "inbounds": [
-            {
-                "tag": "socks-in",
-                "listen": proxy_host,
-                "port": socks_port,
-                "protocol": "socks",
-                "settings": {"auth": "noauth", "udp": True},
-                "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"], "routeOnly": True},
-            },
-            {
-                "tag": "http-in",
-                "listen": proxy_host,
-                "port": http_port,
-                "protocol": "http",
-                "settings": {},
-                "sniffing": {"enabled": True, "destOverride": ["http", "tls"], "routeOnly": True},
-            },
-            {
-                "tag": "api",
-                "listen": proxy_host,
-                "port": api_port,
-                "protocol": "dokodemo-door",
-                "settings": {"address": proxy_host},
-            },
-        ],
-        "outbounds": [
-            {"tag": "proxy", "protocol": "freedom", "settings": {}},
-            {"tag": "direct", "protocol": "freedom", "settings": {}},
-            {"tag": "block", "protocol": "blackhole", "settings": {}},
-            {"tag": "api", "protocol": "freedom", "settings": {}},
-        ],
-        "policy": {
-            "system": {
-                "statsInboundUplink": True,
-                "statsInboundDownlink": True,
-                "statsOutboundUplink": True,
-                "statsOutboundDownlink": True,
-            }
-        },
-        "stats": {},
-        "api": {"tag": "api", "services": ["StatsService"]},
-        "routing": {
-            "domainStrategy": "AsIs",
-            "rules": [
-                {"type": "field", "inboundTag": ["api"], "outboundTag": "api"},
-                {
-                    "type": "field",
-                    "ip": ["geoip:private"],
-                    "network": "tcp,udp",
-                    "outboundTag": "direct",
-                },
-                {
-                    "type": "field",
-                    "domain": ["geosite:private"],
-                    "network": "tcp,udp",
-                    "outboundTag": "direct",
-                },
-                {
-                    "type": "field",
-                    "domain": ["geosite:category-ru"],
-                    "network": "tcp,udp",
-                    "outboundTag": "direct",
-                },
-                {
-                    "type": "field",
-                    "ip": ["geoip:ru"],
-                    "network": "tcp,udp",
-                    "outboundTag": "direct",
-                },
-                {"type": "field", "network": "tcp,udp", "outboundTag": "direct"},
-            ],
-        },
-    }
-    return json.dumps(payload, ensure_ascii=True, indent=2) + "\n"
+    return _read_default_template_text(XRAY_TEMPLATES_DIR, XRAY_DEFAULT_CONFIG_NAME, label="xray")
 
 
 def format_json_error_message(text: str, exc: json.JSONDecodeError) -> str:
