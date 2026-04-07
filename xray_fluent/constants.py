@@ -5,7 +5,7 @@ import sys
 
 
 APP_NAME = "zapret kvn"
-APP_VERSION = "0.4.51"
+APP_VERSION = "0.4.52"
 STATE_SCHEMA_VERSION = 1
 
 PROXY_HOST = "127.0.0.1"
