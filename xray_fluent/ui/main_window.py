@@ -200,6 +200,8 @@ class MainWindow(FluentWindow):
         self.nodes_page.bulk_edit_requested.connect(self._on_bulk_edit_nodes)
 
         self.configs_page.open_requested.connect(self._open_core_config)
+        self.configs_page.config_selected.connect(self._select_core_config)
+        self.configs_page.template_selected.connect(self._select_core_template)
         self.configs_page.reset_requested.connect(self._reset_core_config_to_template)
         self.configs_page.save_requested.connect(self._save_core_config)
         self.configs_page.validate_requested.connect(self._validate_core_config)
@@ -568,6 +570,65 @@ class MainWindow(FluentWindow):
     def _core_title(core: str) -> str:
         return "sing-box" if core == "singbox" else "xray"
 
+    def _get_core_profile_dir(self, core: str, kind: str) -> Path:
+        if core == "singbox":
+            return self.controller.get_singbox_config_dir() if kind == "config" else self.controller.get_singbox_template_dir()
+        return self.controller.get_xray_config_dir() if kind == "config" else self.controller.get_xray_template_dir()
+
+    def _get_active_core_profile_relative(self, core: str, kind: str) -> str:
+        base_dir = self._get_core_profile_dir(core, kind).resolve()
+        if core == "singbox":
+            path = (
+                self.controller.get_active_singbox_config_path()
+                if kind == "config"
+                else self.controller.get_active_singbox_template_path()
+            )
+        else:
+            path = (
+                self.controller.get_active_xray_config_path()
+                if kind == "config"
+                else self.controller.get_active_xray_template_path()
+            )
+        if path is None:
+            return ""
+        try:
+            return path.resolve().relative_to(base_dir).as_posix()
+        except ValueError:
+            return ""
+
+    def _list_core_profile_items(self, core: str, kind: str) -> list[tuple[str, str]]:
+        base_dir = self._get_core_profile_dir(core, kind).resolve()
+        items: list[tuple[str, str]] = []
+        for path in sorted(base_dir.rglob("*.json")):
+            relative = path.relative_to(base_dir).as_posix()
+            items.append((relative, relative))
+        return items
+
+    def _refresh_core_profile_choices(self, core: str) -> None:
+        config_items = self._list_core_profile_items(core, "config")
+        template_items = self._list_core_profile_items(core, "template")
+        self.configs_page.set_available_configs(
+            core,
+            config_items,
+            self._get_active_core_profile_relative(core, "config"),
+        )
+        self.configs_page.set_available_templates(
+            core,
+            template_items,
+            self._get_active_core_profile_relative(core, "template"),
+        )
+
+    def _sync_core_template_for_config(self, core: str, config_path: Path) -> Path | None:
+        if core == "singbox":
+            template_path = self.controller._default_singbox_template_path_for_config(config_path)
+            if template_path is not None:
+                self.controller._set_active_singbox_template_path(template_path, emit_signal=False)
+            return template_path
+        template_path = self.controller._default_xray_template_path_for_config(config_path)
+        if template_path is not None:
+            self.controller._set_active_xray_template_path(template_path, emit_signal=False)
+        return template_path
+
     def _load_config_editor_documents(self) -> None:
         for core in ("singbox", "xray"):
             self._load_core_config_document(core)
@@ -587,8 +648,52 @@ class MainWindow(FluentWindow):
             if core == "singbox"
             else self.controller.get_active_xray_template_path()
         )
+        self._refresh_core_profile_choices(core)
         self.configs_page.set_template_source(core, template_path)
         self.configs_page.set_status(core, "info", f"Открыта активная копия: {path.name}")
+
+    def _select_core_config(self, core: str, relative_path: str) -> None:
+        try:
+            if core == "singbox":
+                path, text = self.controller.load_singbox_config_text(relative_path)
+            else:
+                path, text = self.controller.load_xray_config_text(relative_path)
+            template_path = self._sync_core_template_for_config(core, path)
+            if template_path is None:
+                template_path = (
+                    self.controller.get_active_singbox_template_path()
+                    if core == "singbox"
+                    else self.controller.get_active_xray_template_path()
+                )
+        except Exception as exc:
+            self._refresh_core_profile_choices(core)
+            self.configs_page.set_status(core, "error", str(exc))
+            self._show_status("error", str(exc).splitlines()[0])
+            return
+        self.configs_page.set_document(core, path, text)
+        self._refresh_core_profile_choices(core)
+        self.configs_page.set_template_source(core, template_path)
+        self.configs_page.set_status(core, "info", f"Открыт конфиг: {path.name}")
+        self._show_status("success", f"Открыт конфиг: {path.name}")
+
+    def _select_core_template(self, core: str, relative_path: str) -> None:
+        try:
+            if core == "singbox":
+                path, text = self.controller.import_singbox_template(relative_path)
+                template_path = self.controller.get_active_singbox_template_path()
+            else:
+                path, text = self.controller.import_xray_template(relative_path)
+                template_path = self.controller.get_active_xray_template_path()
+        except Exception as exc:
+            self._refresh_core_profile_choices(core)
+            self.configs_page.set_status(core, "error", str(exc))
+            self._show_status("error", str(exc).splitlines()[0])
+            return
+        self.configs_page.set_document(core, path, text)
+        self._refresh_core_profile_choices(core)
+        self.configs_page.set_template_source(core, template_path)
+        self.configs_page.set_status(core, "info", f"Применён шаблон: {Path(relative_path).name}")
+        self._show_status("success", f"Применён шаблон: {Path(relative_path).name}")
 
     def _open_core_config(self, core: str) -> None:
         title = self._core_title(core)
@@ -612,6 +717,7 @@ class MainWindow(FluentWindow):
             self._show_status("error", str(exc).splitlines()[0])
             return
         self.configs_page.set_document(core, path, text)
+        self._refresh_core_profile_choices(core)
         self.configs_page.set_template_source(core, template_path)
         self.configs_page.set_status(core, "info", f"Импортирован template и обновлена активная копия: {path.name}")
         self._show_status("success", f"Импортирован template и обновлён активный конфиг: {Path(file_path).name}")
@@ -631,6 +737,7 @@ class MainWindow(FluentWindow):
             return
         loaded_path, text = loader()
         self.configs_page.set_document(core, loaded_path, text)
+        self._refresh_core_profile_choices(core)
         self.configs_page.set_template_source(core, template_path)
         self.configs_page.set_status(core, "success", message)
         self._show_status("success", message)
