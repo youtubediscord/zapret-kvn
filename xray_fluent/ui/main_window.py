@@ -613,8 +613,8 @@ class MainWindow(FluentWindow):
             return
         self.configs_page.set_document(core, path, text)
         self.configs_page.set_template_source(core, template_path)
-        self.configs_page.set_status(core, "info", f"Импортирован template. Активная копия: {path.name}")
-        self._show_status("success", f"Импортирован template: {Path(file_path).name}")
+        self.configs_page.set_status(core, "info", f"Импортирован template и обновлена активная копия: {path.name}")
+        self._show_status("success", f"Импортирован template и обновлён активный конфиг: {Path(file_path).name}")
 
     def _reset_core_config_to_template(self, core: str) -> None:
         if core == "singbox":

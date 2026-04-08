@@ -133,6 +133,7 @@ def plan_singbox_runtime(
     outbounds = runtime_config.get("outbounds")
     proxy_index = _find_proxy_outbound_index(outbounds)
     if proxy_index is None:
+        _validate_runtime_dns_contract(runtime_config)
         return SingboxRuntimePlan(
             outcome="native_singbox",
             source_path=document.source_path,
@@ -162,6 +163,7 @@ def plan_singbox_runtime(
     assert isinstance(outbounds, list)
     outbounds[proxy_index] = native_proxy
     _ensure_proxy_server_bootstrap_contract(runtime_config, native_proxy, node.server)
+    _validate_runtime_dns_contract(runtime_config)
     return SingboxRuntimePlan(
         outcome="native_singbox",
         source_path=document.source_path,
@@ -220,6 +222,7 @@ def _plan_hybrid_runtime(
         },
     )
     _ensure_hybrid_protect_route(runtime_config)
+    _validate_runtime_dns_contract(runtime_config)
 
     sidecar = SingboxXraySidecarPlan(
         relay_port=relay_port,
@@ -408,6 +411,54 @@ def _ensure_singbox_tun_runtime_contract(payload: dict[str, Any]) -> None:
         inbound["interface_name"] = _generate_tun_interface_name()
 
 
+def _validate_runtime_dns_contract(payload: dict[str, Any]) -> None:
+    dns = payload.get("dns")
+    server_tags: set[str] = set()
+    if isinstance(dns, dict):
+        for server in dns.get("servers") or []:
+            if not isinstance(server, dict):
+                continue
+            tag = str(server.get("tag") or "").strip()
+            if tag:
+                server_tags.add(tag)
+
+    missing_refs: list[str] = []
+
+    def require_dns_tag(tag: str, owner: str) -> None:
+        if not tag or tag in server_tags:
+            return
+        missing_refs.append(f"{owner} -> {tag}")
+
+    route = payload.get("route")
+    if isinstance(route, dict):
+        require_dns_tag(_extract_dns_server_tag(route.get("default_domain_resolver")), "route.default_domain_resolver")
+
+    if isinstance(dns, dict):
+        require_dns_tag(_extract_dns_server_tag(dns.get("final")), "dns.final")
+        for index, rule in enumerate(dns.get("rules") or []):
+            if not isinstance(rule, dict):
+                continue
+            require_dns_tag(_extract_dns_server_tag(rule.get("server")), f"dns.rules[{index}].server")
+
+    for index, outbound in enumerate(payload.get("outbounds") or []):
+        if not isinstance(outbound, dict):
+            continue
+        require_dns_tag(
+            _extract_dns_server_tag(outbound.get("domain_resolver")),
+            f"outbounds[{index}].domain_resolver",
+        )
+
+    if not missing_refs:
+        return
+
+    details = "; ".join(dict.fromkeys(missing_refs))
+    raise ValueError(
+        "В sing-box конфиге отсутствует DNS-сервер с нужным tag. "
+        f"Проверьте раздел dns.servers: {details}. "
+        "Обычно для стандартного шаблона должны существовать теги `bootstrap-dns` и `proxy-dns`."
+    )
+
+
 def _find_proxy_outbound_index(outbounds: Any) -> int | None:
     if not isinstance(outbounds, list):
         return None
@@ -445,6 +496,14 @@ def _ensure_list(parent: dict[str, Any], key: str) -> list[Any]:
     created: list[Any] = []
     parent[key] = created
     return created
+
+
+def _extract_dns_server_tag(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        return str(value.get("server") or "").strip()
+    return ""
 
 
 def _find_free_port(

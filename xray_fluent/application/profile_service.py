@@ -107,11 +107,14 @@ def import_template(controller: AppController, engine: str, path: str | Path) ->
     relative = template_path.relative_to(template_dir).as_posix()
     active_path = resolve_config(relative)
     active_path.parent.mkdir(parents=True, exist_ok=True)
-    if not active_path.exists():
-        active_path.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
+    template_text = template_path.read_text(encoding="utf-8")
+    # Keep the selected template and the active runtime copy in sync. Otherwise
+    # the UI can appear to switch templates while launch still uses an older
+    # config file from data/configs/.
+    active_path.write_text(template_text, encoding="utf-8")
     set_template(template_path)
     set_config(active_path)
-    text = active_path.read_text(encoding="utf-8")
+    text = template_text
     if engine == "singbox":
         controller._cache_singbox_document_state(active_path, text)
     return active_path, text
