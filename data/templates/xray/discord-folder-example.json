@@ -5,7 +5,7 @@
   "inbounds": [
     {
       "tag": "socks-in",
-      "listen": "127.0.0.1",
+      "listen": "0.0.0.0",
       "port": 10808,
       "protocol": "socks",
       "settings": {
@@ -24,7 +24,7 @@
     },
     {
       "tag": "http-in",
-      "listen": "127.0.0.1",
+      "listen": "0.0.0.0",
       "port": 10809,
       "protocol": "http",
       "settings": {},
@@ -58,6 +58,38 @@
   "routing": {
     "domainStrategy": "AsIs",
     "rules": [
+      {
+        "type": "field",
+        "ip": [
+          "geoip:private"
+        ],
+        "network": "tcp,udp",
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "domain": [
+          "geosite:private"
+        ],
+        "network": "tcp,udp",
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "domain": [
+          "geosite:category-ru"
+        ],
+        "network": "tcp,udp",
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "ip": [
+          "geoip:ru"
+        ],
+        "network": "tcp,udp",
+        "outboundTag": "direct"
+      },
       {
         "type": "field",
         "process": [

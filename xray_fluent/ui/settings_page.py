@@ -235,10 +235,11 @@ class SettingsPage(QWidget):
 
         self.tun_engine_card = _ComboCard(
             FIF.DEVELOPER_TOOLS, "Движок TUN",
-            "sing-box — рекомендуемый TUN engine; xray — экспериментальный native TUN на том же raw xray.json",
+            "sing-box — рекомендуемый TUN engine; xray — experimental native TUN; tun2socks — отдельный fallback engine",
             [
                 ("sing-box (recommended)", "singbox"),
                 ("xray (experimental)", "xray"),
+                ("tun2socks", "tun2socks"),
             ],
             parent=paths_group,
         )
@@ -418,8 +419,7 @@ class SettingsPage(QWidget):
                 migrate_default_location=True,
             )
         )
-        tun_engine_value = "xray" if settings.tun_engine == "tun2socks" else settings.tun_engine
-        self._select_combo_data(self.tun_engine_card.combo, tun_engine_value)
+        self._select_combo_data(self.tun_engine_card.combo, settings.tun_engine)
         self.launch_card.setChecked(settings.launch_on_startup)
         self.launch_in_tray_card.setChecked(settings.launch_in_tray)
         self.reconnect_card.setChecked(settings.reconnect_on_network_change)

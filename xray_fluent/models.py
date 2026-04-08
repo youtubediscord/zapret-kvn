@@ -180,7 +180,7 @@ class AppSettings:
     xray_update_feed_url: str = ""
     xray_auto_update: bool = False
     tun_mode: bool = False
-    tun_engine: str = "singbox"  # "singbox" | "xray" | legacy "tun2socks"
+    tun_engine: str = "singbox"  # "singbox" | "xray" | "tun2socks"
     xray_config_file: str = ""
     xray_template_file: str = ""
     singbox_path: str = ""

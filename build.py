@@ -39,6 +39,20 @@ def _print(msg: str) -> None:
     print(f"[build] {msg}", flush=True)
 
 
+def _windows_path(path: Path) -> str:
+    """Convert a repo path to a Windows path when running via WSL interop."""
+    resolved = path.resolve()
+    if os.name == "nt":
+        return str(resolved)
+    result = subprocess.run(
+        ["wslpath", "-w", str(resolved)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
 def _run(cmd: list[str], **kwargs) -> None:
     _print(f"> {' '.join(cmd)}")
     subprocess.run(cmd, check=True, **kwargs)
@@ -110,15 +124,15 @@ def build_exe() -> None:
 
     cmd = [
         str(VENV_PYTHON), "-m", "PyInstaller",
-        str(ROOT / "main.py"),
+        _windows_path(ROOT / "main.py"),
         "--name", APP_NAME,
         "--noconfirm",
         "--clean",
         "--console",
         "--onedir",
         "--uac-admin",
-        "--manifest", str(MANIFEST),
-        "--distpath", str(temp_dist),
+        "--manifest", _windows_path(MANIFEST),
+        "--distpath", _windows_path(temp_dist),
         # win32comext is needed by qframelesswindow for Mica/DWM effects
         "--hidden-import", "win32comext",
         "--hidden-import", "win32comext.shell",

@@ -3,22 +3,23 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
+from ipaddress import ip_address
 import json
 import secrets
 import socket
-import string
 from pathlib import Path
 from typing import Any
 
-from .constants import (
+from ...application.runtime_security import generate_local_proxy_credentials, strip_singbox_proxy_inbounds
+from ...constants import (
     PROXY_HOST,
     SINGBOX_CLASH_API_PORT,
     SINGBOX_XRAY_RELAY_PORT,
     SS_PROTECT_PORT_END,
     SS_PROTECT_PORT_START,
 )
-from .models import Node
-from .singbox_config_builder import build_singbox_outbound
+from ...models import Node
+from .config_builder import build_singbox_outbound
 
 
 _SS_PROTECT_METHOD = "chacha20-ietf-poly1305"
@@ -33,6 +34,8 @@ class SingboxDocumentState:
     text: str
     text_hash: str
     has_proxy_outbound: bool
+    file_mtime_ns: int = 0
+    file_size: int = 0
 
 
 @dataclass(slots=True)
@@ -47,6 +50,8 @@ class ParsedSingboxDocument:
 @dataclass(slots=True)
 class SingboxXraySidecarPlan:
     relay_port: int
+    relay_username: str
+    relay_password: str
     protect_port: int
     protect_password: str
     config: dict[str, Any]
@@ -85,19 +90,20 @@ def inspect_singbox_document_text(source_path: Path, text: str) -> SingboxDocume
 
 
 def parse_singbox_document(source_path: Path, text: str) -> ParsedSingboxDocument:
-    state = inspect_singbox_document_text(source_path, text)
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"{source_path.name}: {_format_json_error_message(text, exc)}") from exc
     if not isinstance(payload, dict):
         raise ValueError("Корень sing-box config должен быть JSON-объектом.")
+    text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    has_proxy_outbound = _config_has_proxy_outbound(payload)
     return ParsedSingboxDocument(
         source_path=source_path,
         text=text,
-        text_hash=state.text_hash,
+        text_hash=text_hash,
         payload=payload,
-        has_proxy_outbound=state.has_proxy_outbound,
+        has_proxy_outbound=has_proxy_outbound,
     )
 
 
@@ -120,6 +126,7 @@ def plan_singbox_runtime(
     preferred_protect_password: str = "",
 ) -> SingboxRuntimePlan:
     runtime_config = deepcopy(document.payload)
+    strip_singbox_proxy_inbounds(runtime_config)
     _ensure_singbox_metrics_contract(runtime_config)
     _ensure_singbox_tun_runtime_contract(runtime_config)
 
@@ -154,6 +161,7 @@ def plan_singbox_runtime(
 
     assert isinstance(outbounds, list)
     outbounds[proxy_index] = native_proxy
+    _ensure_proxy_server_bootstrap_contract(runtime_config, native_proxy, node.server)
     return SingboxRuntimePlan(
         outcome="native_singbox",
         source_path=document.source_path,
@@ -183,6 +191,7 @@ def _plan_hybrid_runtime(
         excluded=excluded_ports,
     )
     protect_password = preferred_protect_password or _generate_ss_password()
+    relay_username, relay_password = generate_local_proxy_credentials(prefix="sidecar")
 
     outbounds = runtime_config.setdefault("outbounds", [])
     assert isinstance(outbounds, list)
@@ -191,6 +200,8 @@ def _plan_hybrid_runtime(
         "tag": "proxy",
         "server": PROXY_HOST,
         "server_port": relay_port,
+        "username": relay_username,
+        "password": relay_password,
         # Keep the relay on loopback so sing-box does not bind it to the
         # physical adapter via auto-detect rules.
         "inet4_bind_address": PROXY_HOST,
@@ -212,11 +223,15 @@ def _plan_hybrid_runtime(
 
     sidecar = SingboxXraySidecarPlan(
         relay_port=relay_port,
+        relay_username=relay_username,
+        relay_password=relay_password,
         protect_port=protect_port,
         protect_password=protect_password,
         config=_build_xray_sidecar_config(
             node,
             relay_port=relay_port,
+            relay_username=relay_username,
+            relay_password=relay_password,
             protect_port=protect_port,
             protect_password=protect_password,
         ),
@@ -236,6 +251,8 @@ def _build_xray_sidecar_config(
     node: Node,
     *,
     relay_port: int,
+    relay_username: str,
+    relay_password: str,
     protect_port: int,
     protect_password: str,
 ) -> dict[str, Any]:
@@ -263,7 +280,11 @@ def _build_xray_sidecar_config(
                 "protocol": "socks",
                 "listen": PROXY_HOST,
                 "port": relay_port,
-                "settings": {"auth": "noauth", "udp": True},
+                "settings": {
+                    "auth": "password",
+                    "accounts": [{"user": relay_username, "pass": relay_password}],
+                    "udp": True,
+                },
                 "sniffing": {
                     "enabled": True,
                     "destOverride": ["http", "tls", "quic"],
@@ -299,6 +320,53 @@ def _build_xray_sidecar_config(
             ],
         },
     }
+
+
+def _is_domain_name(value: str) -> bool:
+    host = str(value or "").strip()
+    if not host:
+        return False
+    try:
+        ip_address(host)
+    except ValueError:
+        return True
+    return False
+
+
+def _ensure_proxy_server_bootstrap_contract(
+    payload: dict[str, Any],
+    proxy_outbound: dict[str, Any],
+    preferred_server: str,
+) -> None:
+    server = str(preferred_server or proxy_outbound.get("server") or "").strip()
+    if not _is_domain_name(server):
+        return
+
+    # Domain-based proxy servers must resolve through bootstrap-dns, otherwise
+    # proxy-dns can recurse into the proxy outbound before the tunnel is ready.
+    proxy_outbound["domain_resolver"] = "bootstrap-dns"
+
+    route = _ensure_dict(payload, "route")
+    rules = _ensure_list(route, "rules")
+    direct_rule = {"domain": [server], "action": "route", "outbound": "direct"}
+
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        domain_value = rule.get("domain")
+        if isinstance(domain_value, list) and server in [str(item) for item in domain_value]:
+            rules[index] = direct_rule
+            return
+
+    insert_index = 0
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        if rule.get("action") == "sniff" or rule.get("protocol") == "dns":
+            insert_index = index + 1
+            continue
+        break
+    rules.insert(insert_index, direct_rule)
 
 
 def _ensure_hybrid_protect_route(payload: dict[str, Any]) -> None:
@@ -407,8 +475,8 @@ def _find_free_port(
 
 
 def _generate_ss_password(length: int = 24) -> str:
-    alphabet = string.ascii_letters + string.digits
-    return "".join(secrets.choice(alphabet) for _ in range(length))
+    _, password = generate_local_proxy_credentials(prefix="protect", password_length=length)
+    return password
 
 
 def _generate_tun_interface_name() -> str:

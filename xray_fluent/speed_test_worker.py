@@ -11,7 +11,7 @@ from urllib.request import ProxyHandler, Request
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from .config_builder import build_xray_config
+from .engines.xray import build_xray_config
 from .constants import (
     PROXY_HOST,
     SPEED_TEST_DEFAULT_URL,

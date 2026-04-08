@@ -10,9 +10,9 @@ _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 from PyQt6.QtCore import QObject, QProcess, pyqtSignal
 
-from .constants import RUNTIME_DIR, SINGBOX_CONFIG_FILE, SINGBOX_PATH_DEFAULT
-from .path_utils import resolve_configured_path
-from .subprocess_utils import (
+from ...constants import RUNTIME_DIR, SINGBOX_CONFIG_FILE, SINGBOX_PATH_DEFAULT
+from ...path_utils import resolve_configured_path
+from ...subprocess_utils import (
     decode_output,
     kill_processes_by_path,
     result_output_text,
@@ -85,9 +85,6 @@ class SingBoxManager(QObject):
 
         # Kill any orphaned sing-box processes to free the TUN adapter
         self._kill_orphaned(exe)
-
-        # Ensure TUN adapter is released before starting
-        self._wait_tun_released()
 
         # Set working directory to core/ so sing-box can find wintun.dll
         core_dir = exe.parent

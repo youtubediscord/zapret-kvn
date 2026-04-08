@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import os
 from typing import Any
+from urllib.parse import quote
 
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 from PyQt6.QtCore import QObject, QProcess, pyqtSignal
 
-from .constants import BASE_DIR
-from .subprocess_utils import (
+from ...constants import BASE_DIR
+from ...subprocess_utils import (
     decode_output,
     kill_processes_by_path,
     result_output_text,
@@ -54,7 +55,7 @@ class Tun2SocksManager(QObject):
     def is_running(self) -> bool:
         return self._running
 
-    def start(self, socks_port: int, server_ip: str = "") -> bool:
+    def start(self, socks_port: int, *, username: str = "", password: str = "", server_ip: str = "") -> bool:
         exe = TUN2SOCKS_PATH_DEFAULT
         if not exe.is_file():
             self.error.emit(f"tun2socks.exe not found: {exe}")
@@ -74,9 +75,13 @@ class Tun2SocksManager(QObject):
         self._kill_orphaned()
 
         self._process.setProgram(str(exe))
+        proxy_url = f"socks5://127.0.0.1:{socks_port}"
+        if username or password:
+            proxy_url = f"socks5://{quote(username, safe='')}:{quote(password, safe='')}@127.0.0.1:{socks_port}"
+
         self._process.setArguments([
             "-device", f"tun://{TUN_DEVICE_NAME}",
-            "-proxy", f"socks5://127.0.0.1:{socks_port}",
+            "-proxy", proxy_url,
             "-loglevel", "error",
         ])
         self._process.start()

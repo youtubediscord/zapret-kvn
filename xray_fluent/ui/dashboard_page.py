@@ -708,7 +708,7 @@ class DashboardPage(QWidget):
     def _is_xray_tun_mode(self) -> bool:
         return bool(self._settings.tun_mode and self._settings.tun_engine == "xray")
 
-    def _is_legacy_tun2socks_mode(self) -> bool:
+    def _is_tun2socks_mode(self) -> bool:
         return bool(self._settings.tun_mode and self._settings.tun_engine == "tun2socks")
 
     def _route_engine_label(self) -> str:
@@ -718,7 +718,7 @@ class DashboardPage(QWidget):
             if self._is_xray_tun_mode():
                 config_name = Path(self._settings.xray_config_file or "default.json").name
                 return f"VPN (TUN) -> xray (experimental) · raw xray config: {config_name}"
-            return "VPN (TUN) -> tun2socks (legacy)"
+            return "VPN (TUN) -> tun2socks"
         config_name = Path(self._settings.xray_config_file or "default.json").name
         if self._settings.enable_system_proxy:
             return f"Системный прокси Windows -> xray config: {config_name}"
@@ -830,5 +830,5 @@ class DashboardPage(QWidget):
         busy = self._transition_busy or self._connection_phase == "starting"
         self.toggle_btn.setEnabled(has_profiles and not busy)
         self.tun_switch.setEnabled(not busy)
-        self.mode_combo.setEnabled(not busy and self._is_legacy_tun2socks_mode())
+        self.mode_combo.setEnabled(not busy and self._is_tun2socks_mode())
         self.proxy_switch.setEnabled(not busy and not self._settings.tun_mode)

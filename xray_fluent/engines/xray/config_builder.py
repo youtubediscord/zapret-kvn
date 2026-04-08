@@ -5,7 +5,7 @@ from copy import deepcopy
 from ipaddress import ip_network
 from typing import Any
 
-from .constants import (
+from ...constants import (
     DEFAULT_HTTP_PORT,
     DEFAULT_SOCKS_PORT,
     PROXY_HOST,
@@ -14,8 +14,8 @@ from .constants import (
     ROUTING_RULE,
     DEFAULT_XRAY_STATS_API_PORT,
 )
-from .models import AppSettings, Node, RoutingSettings
-from .service_presets import SERVICE_PRESETS_BY_ID
+from ...models import AppSettings, Node, RoutingSettings
+from ...service_presets import SERVICE_PRESETS_BY_ID
 
 
 def _normalize_loglevel(value: str) -> str:

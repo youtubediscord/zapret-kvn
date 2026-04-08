@@ -6,8 +6,8 @@ from dataclasses import dataclass
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from .constants import XRAY_TUN_DEFAULT_INTERFACE_NAME
-from .subprocess_utils import CREATE_NO_WINDOW, result_output_text, run_text_pumped, sleep_with_events
+from ...constants import XRAY_TUN_DEFAULT_INTERFACE_NAME
+from ...subprocess_utils import CREATE_NO_WINDOW, result_output_text, run_text_pumped, sleep_with_events
 
 
 @dataclass(slots=True)

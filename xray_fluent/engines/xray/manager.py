@@ -14,9 +14,9 @@ _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 from PyQt6.QtCore import QObject, QProcess, pyqtSignal
 
-from .constants import RUNTIME_DIR, XRAY_CONFIG_FILE, XRAY_PATH_DEFAULT
-from .path_utils import resolve_configured_path
-from .subprocess_utils import (
+from ...constants import RUNTIME_DIR, XRAY_CONFIG_FILE, XRAY_PATH_DEFAULT
+from ...path_utils import resolve_configured_path
+from ...subprocess_utils import (
     decode_output,
     kill_processes_by_path,
     pump_qt_events,

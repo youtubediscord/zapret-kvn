@@ -22,7 +22,7 @@ from ..storage import PassphraseRequired
 from ..constants import APP_NAME, APP_VERSION, LOG_DIR
 from ..models import AppSettings, Node, RoutingSettings
 from ..app_updater import AppUpdate, UpdateChecker, UpdateDownloader
-from ..xray_core_updater import XrayCoreUpdateResult
+from ..engines.xray import XrayCoreUpdateResult
 from .bulk_edit_dialog import BulkEditDialog
 from .dashboard_page import DashboardPage
 from .lock_dialog import PasswordDialog
@@ -108,7 +108,7 @@ class MainWindow(FluentWindow):
         self._consume_update_error_log()
 
         # Set Xray version on updates page
-        from ..xray_manager import get_xray_version
+        from ..engines.xray import get_xray_version
         xv = get_xray_version(self.controller.state.settings.xray_path)
         self.updates_page.set_xray_version(xv or "")
 

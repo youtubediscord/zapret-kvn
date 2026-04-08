@@ -10,15 +10,15 @@ import shutil
 import tempfile
 from urllib.request import Request
 
-from .http_utils import urlopen
+from ...http_utils import urlopen
 import zipfile
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from .constants import XRAY_GITHUB_RELEASES_API, XRAY_PATH_DEFAULT
-from .path_utils import resolve_configured_path
-from .update_checker import check_update
-from .xray_manager import get_xray_version
+from ...constants import XRAY_GITHUB_RELEASES_API, XRAY_PATH_DEFAULT
+from ...path_utils import resolve_configured_path
+from ...update_checker import check_update
+from .manager import get_xray_version
 
 
 @dataclass(slots=True)
