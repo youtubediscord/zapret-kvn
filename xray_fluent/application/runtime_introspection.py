@@ -23,6 +23,15 @@ def infer_singbox_outbound_endpoint(outbound: dict[str, Any]) -> tuple[str, int]
         port = int(outbound.get("server_port") or 0)
     except (TypeError, ValueError):
         port = 0
+    if not host or port <= 0:
+        # Endpoint-конфиги (wireguard) хранят адрес сервера в peers[0].
+        peers = outbound.get("peers")
+        if isinstance(peers, list) and peers and isinstance(peers[0], dict):
+            host = str(peers[0].get("address") or "").strip()
+            try:
+                port = int(peers[0].get("port") or 0)
+            except (TypeError, ValueError):
+                port = 0
     if not host or port <= 0 or is_local_runtime_host(host):
         return "", 0
     return host, port
@@ -61,12 +70,13 @@ def infer_xray_outbound_endpoint(outbound: dict[str, Any]) -> tuple[str, int]:
 def infer_singbox_ping_target(payload: dict[str, Any], node) -> tuple[str, int]:
     if node is not None and node.server and node.port > 0:
         return node.server, node.port
-    for outbound in payload.get("outbounds") or []:
-        if not isinstance(outbound, dict):
-            continue
-        host, port = infer_singbox_outbound_endpoint(outbound)
-        if host and port > 0:
-            return host, port
+    for section in ("outbounds", "endpoints"):
+        for outbound in payload.get(section) or []:
+            if not isinstance(outbound, dict):
+                continue
+            host, port = infer_singbox_outbound_endpoint(outbound)
+            if host and port > 0:
+                return host, port
     return "", 0
 
 

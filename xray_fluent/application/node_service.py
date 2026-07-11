@@ -16,7 +16,7 @@ def import_nodes_from_text(controller: AppController, text: str) -> tuple[int, l
     if not nodes:
         return 0, errors
 
-    existing_links = {node.link for node in controller.state.nodes}
+    existing_links = {node.link for node in controller.state.nodes if node.link}
     max_order = max((node.sort_order for node in controller.state.nodes), default=0)
     first_new_id: str | None = None
     added = 0
@@ -25,14 +25,15 @@ def import_nodes_from_text(controller: AppController, text: str) -> tuple[int, l
         if problem:
             errors.append(problem)
             continue
-        if node.link in existing_links:
+        if node.link and node.link in existing_links:
             continue
         if not node.country_code:
             node.country_code = detect_country(node.name, node.server)
         max_order += 1
         node.sort_order = max_order
         controller.state.nodes.append(node)
-        existing_links.add(node.link)
+        if node.link:
+            existing_links.add(node.link)
         if first_new_id is None:
             first_new_id = node.id
         added += 1

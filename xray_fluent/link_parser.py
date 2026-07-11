@@ -14,6 +14,11 @@ class LinkParseError(ValueError):
 
 def parse_links_text(text: str) -> tuple[list[Node], list[str]]:
     stripped = text.strip()
+    if _looks_like_wireguard_conf(stripped):
+        try:
+            return [_parse_wireguard_conf(text)], []
+        except Exception as exc:
+            return [], [str(exc)]
     lines: list[str]
     if stripped.startswith("{"):
         try:
@@ -44,6 +49,9 @@ def parse_single(raw: str) -> Node:
 
     if text.startswith("{"):
         return _parse_json_outbound(text)
+
+    if _looks_like_wireguard_conf(text):
+        return _parse_wireguard_conf(text)
 
     scheme = urlsplit(text).scheme.lower()
     if scheme == "vless":
@@ -398,6 +406,25 @@ def validate_node_outbound(node: Node) -> str | None:
     native_type = str(outbound.get("type") or "").strip().lower()
     protocol = str(outbound.get("protocol") or "").strip().lower()
     if native_type and not protocol:
+        if native_type == "wireguard":
+            node_label = node.name or native_type
+            if not str(outbound.get("private_key") or "").strip():
+                return f"Сервер {node_label} не содержит private_key для WireGuard."
+            peers = outbound.get("peers")
+            if not isinstance(peers, list) or not peers:
+                return f"Сервер {node_label} не содержит peers для WireGuard."
+            for peer in peers:
+                if not isinstance(peer, dict) or not str(peer.get("public_key") or "").strip():
+                    return f"Сервер {node_label}: у peer отсутствует public_key."
+                if not str(peer.get("address") or "").strip() or not peer.get("port"):
+                    return f"Сервер {node_label}: у peer отсутствует address или port."
+            amnezia = outbound.get("amnezia")
+            if isinstance(amnezia, dict):
+                for key in ("jc", "jmin", "jmax"):
+                    value = amnezia.get(key)
+                    if value is not None and not isinstance(value, int):
+                        return f"Сервер {node_label}: параметр amnezia `{key}` должен быть числом."
+            return None
         if native_type in {"hysteria", "hysteria2", "tuic"}:
             server = str(outbound.get("server") or "").strip()
             has_port = bool(outbound.get("server_port") or outbound.get("server_ports"))
@@ -837,6 +864,143 @@ def _parse_http_proxy(link: str) -> Node:
     )
 
 
+_AMNEZIA_INT_KEYS = ("jc", "jmin", "jmax", "s1", "s2", "s3", "s4", "itime")
+_AMNEZIA_INT_OR_STR_KEYS = ("h1", "h2", "h3", "h4")
+_AMNEZIA_STR_KEYS = ("i1", "i2", "i3", "i4", "i5", "j1", "j2", "j3")
+
+
+def _looks_like_wireguard_conf(text: str) -> bool:
+    return any(line.strip().lower() == "[interface]" for line in text.splitlines())
+
+
+def _wg_int(value: str, field: str) -> int:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise LinkParseError(f"некорректное число в поле {field}: {value}") from exc
+
+
+def _split_endpoint(value: str) -> tuple[str, int]:
+    endpoint = str(value or "").strip()
+    if endpoint.startswith("["):
+        closing = endpoint.find("]")
+        if closing < 0 or not endpoint[closing + 1 :].startswith(":"):
+            raise LinkParseError(f"некорректный Endpoint: {value}")
+        return endpoint[1:closing], _wg_int(endpoint[closing + 2 :], "Endpoint")
+    if ":" not in endpoint:
+        raise LinkParseError(f"некорректный Endpoint: {value}")
+    host, port_text = endpoint.rsplit(":", 1)
+    if not host:
+        raise LinkParseError(f"некорректный Endpoint: {value}")
+    return host, _wg_int(port_text, "Endpoint")
+
+
+def _parse_amnezia_params(interface: dict[str, str]) -> dict[str, Any]:
+    amnezia: dict[str, Any] = {}
+    for key in _AMNEZIA_INT_KEYS:
+        if key in interface:
+            amnezia[key] = _wg_int(interface[key], key)
+    for key in _AMNEZIA_INT_OR_STR_KEYS:
+        if key in interface:
+            value = interface[key].strip()
+            try:
+                amnezia[key] = int(value)
+            except ValueError:
+                amnezia[key] = value
+    for key in _AMNEZIA_STR_KEYS:
+        if key in interface:
+            amnezia[key] = interface[key].strip()
+    return amnezia
+
+
+def _parse_wireguard_conf(text: str) -> Node:
+    interface: dict[str, str] = {}
+    raw_peers: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    name = ""
+    seen_section = False
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("#") or line.startswith(";"):
+            if not seen_section and not name:
+                name = line.lstrip("#;").strip()
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            seen_section = True
+            section = line[1:-1].strip().lower()
+            if section == "interface":
+                current = interface
+            elif section == "peer":
+                current = {}
+                raw_peers.append(current)
+            else:
+                raise LinkParseError(f"неизвестная секция [{section}] в WireGuard-конфиге")
+            continue
+        if current is None or "=" not in line:
+            raise LinkParseError(f"некорректная строка WireGuard-конфига: {line}")
+        key, value = line.split("=", 1)
+        current[key.strip().lower()] = value.strip()
+
+    private_key = interface.get("privatekey", "")
+    if not private_key:
+        raise LinkParseError("в [Interface] отсутствует PrivateKey")
+    if not raw_peers:
+        raise LinkParseError("WireGuard-конфиг не содержит секцию [Peer]")
+
+    outbound: dict[str, Any] = {"type": "wireguard"}
+    address = [item.strip() for item in interface.get("address", "").split(",") if item.strip()]
+    if address:
+        outbound["address"] = address
+    outbound["private_key"] = private_key
+    if "mtu" in interface:
+        outbound["mtu"] = _wg_int(interface["mtu"], "MTU")
+    if "listenport" in interface:
+        outbound["listen_port"] = _wg_int(interface["listenport"], "ListenPort")
+
+    peers: list[dict[str, Any]] = []
+    for raw_peer in raw_peers:
+        endpoint = raw_peer.get("endpoint", "")
+        if not endpoint:
+            raise LinkParseError("в [Peer] отсутствует Endpoint")
+        host, port = _split_endpoint(endpoint)
+        peer: dict[str, Any] = {
+            "address": host,
+            "port": port,
+        }
+        public_key = raw_peer.get("publickey", "")
+        if public_key:
+            peer["public_key"] = public_key
+        pre_shared_key = raw_peer.get("presharedkey", "")
+        if pre_shared_key:
+            peer["pre_shared_key"] = pre_shared_key
+        allowed_ips = [item.strip() for item in raw_peer.get("allowedips", "").split(",") if item.strip()]
+        if allowed_ips:
+            peer["allowed_ips"] = allowed_ips
+        if "persistentkeepalive" in raw_peer:
+            peer["persistent_keepalive_interval"] = _wg_int(raw_peer["persistentkeepalive"], "PersistentKeepalive")
+        peers.append(peer)
+    outbound["peers"] = peers
+
+    amnezia = _parse_amnezia_params(interface)
+    if amnezia:
+        outbound["amnezia"] = amnezia
+
+    scheme = "awg" if amnezia else "wireguard"
+    server = str(peers[0].get("address") or "")
+    port = int(peers[0].get("port") or 0)
+    return Node(
+        name=name or f"{scheme}-{server}:{port}",
+        scheme=scheme,
+        server=server,
+        port=port,
+        link=text,
+        outbound=outbound,
+    )
+
+
 def _parse_json_outbound(text: str) -> Node:
     payload = json.loads(text)
 
@@ -851,8 +1015,14 @@ def _parse_json_outbound(text: str) -> Node:
             raise LinkParseError("JSON `outbounds` must contain an object")
         selected = next((item for item in candidates if item.get("tag") == "proxy"), candidates[0])
         outbound = dict(selected)
+    elif isinstance(payload.get("endpoints"), list) and payload["endpoints"]:
+        candidates = [item for item in payload["endpoints"] if isinstance(item, dict)]
+        if not candidates:
+            raise LinkParseError("JSON `endpoints` must contain an object")
+        selected = next((item for item in candidates if item.get("tag") == "proxy"), candidates[0])
+        outbound = dict(selected)
     else:
-        raise LinkParseError("JSON must contain `protocol`, `type`, or `outbounds`")
+        raise LinkParseError("JSON must contain `protocol`, `type`, `outbounds`, or `endpoints`")
 
     protocol = str(outbound.get("protocol") or outbound.get("type") or "custom")
     tag = str(outbound.get("tag") or protocol)
@@ -860,6 +1030,25 @@ def _parse_json_outbound(text: str) -> Node:
     port = 0
 
     if outbound.get("type") and not outbound.get("protocol"):
+        native_type = str(outbound.get("type") or "").strip().lower()
+        if native_type == "wireguard":
+            peers = outbound.get("peers") or []
+            first_peer = peers[0] if peers and isinstance(peers[0], dict) else {}
+            server = str(first_peer.get("address") or "")
+            try:
+                port = int(first_peer.get("port") or 0)
+            except (TypeError, ValueError):
+                port = 0
+            if isinstance(outbound.get("amnezia"), dict) and outbound["amnezia"]:
+                protocol = "awg"
+            return Node(
+                name=f"json-{tag}",
+                scheme=protocol,
+                server=server,
+                port=port,
+                link=text,
+                outbound=outbound,
+            )
         server = str(outbound.get("server") or "")
         try:
             port = int(outbound.get("server_port") or 0)

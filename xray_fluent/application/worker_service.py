@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from ..connectivity_test import ConnectivityTestWorker
 from ..constants import DEFAULT_HTTP_PORT, XRAY_PATH_DEFAULT
 from ..path_utils import resolve_configured_path
-from ..ping_worker import PingWorker
+from ..ping_worker import PingWorker, apply_ping_measurement
 from ..speed_test_worker import SpeedTestWorker
 
 if TYPE_CHECKING:
@@ -63,6 +63,9 @@ def speed_test_nodes(controller: AppController, node_ids: set[str] | None = None
         routing=controller.state.routing,
     )
     controller._speed_worker.result.connect(controller._on_speed_result)
+    controller._speed_worker.skipped.connect(
+        lambda _node_id, message: controller.status.emit("info", message)
+    )
     controller._speed_worker.progress.connect(controller._on_speed_progress)
     controller._speed_worker.node_progress.connect(controller._on_speed_node_progress)
     controller._speed_worker.completed.connect(controller._on_speed_complete)
@@ -100,11 +103,9 @@ def on_ping_result(controller: AppController, node_id: str, ping_ms: int | None)
         return
     for node in controller.state.nodes:
         if node.id == node_id:
-            node.ping_ms = ping_ms
-            if ping_ms is not None or node.is_alive is None:
-                node.is_alive = ping_ms is not None
+            apply_ping_measurement(node, ping_ms)
             ts = datetime.now(timezone.utc).isoformat()
-            node.ping_history.append((ts, ping_ms))
+            node.ping_history.append((ts, node.ping_ms))
             if len(node.ping_history) > 50:
                 node.ping_history = node.ping_history[-50:]
             break

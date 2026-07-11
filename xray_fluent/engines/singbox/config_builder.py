@@ -5,6 +5,22 @@ from typing import Any
 
 _SUPPORTED_NATIVE_PROTOCOLS = {"vless", "vmess", "trojan", "shadowsocks", "socks", "http"}
 
+# Типы, которые sing-box 1.13+ принимает только в top-level массиве `endpoints[]`,
+# а не в `outbounds[]`.
+_SINGBOX_ENDPOINT_TYPES = {"wireguard"}
+
+
+def is_singbox_endpoint_outbound(outbound: dict[str, Any] | None) -> bool:
+    """True, если конфиг ноды — sing-box endpoint (например, WireGuard/AWG)."""
+    if not isinstance(outbound, dict):
+        return False
+    native_type = str(outbound.get("type") or "").strip().lower()
+    return native_type in _SINGBOX_ENDPOINT_TYPES and not outbound.get("protocol")
+
+
+def is_singbox_endpoint_node(node) -> bool:
+    return node is not None and is_singbox_endpoint_outbound(node.outbound)
+
 
 def build_singbox_outbound(node, *, tag: str = "proxy") -> dict[str, Any]:
     """Convert a stored node outbound into a native sing-box outbound."""

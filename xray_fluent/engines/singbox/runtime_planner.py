@@ -21,7 +21,7 @@ from ...constants import (
     SS_PROTECT_PORT_START,
 )
 from ...models import Node
-from .config_builder import build_singbox_outbound
+from .config_builder import build_singbox_outbound, is_singbox_endpoint_node
 
 
 _SS_PROTECT_METHOD = "chacha20-ietf-poly1305"
@@ -136,6 +136,8 @@ def parse_singbox_document(source_path: Path, text: str) -> ParsedSingboxDocumen
 def classify_node_for_singbox(node: Node | None) -> str:
     if node is None:
         return "native_singbox"
+    if is_singbox_endpoint_node(node):
+        return "native_singbox_endpoint"
     try:
         build_singbox_outbound(node, tag="proxy")
     except ValueError:
@@ -233,6 +235,29 @@ def _plan_runtime_outbound(
 
     if node is None:
         raise ValueError("В конфиге есть outbound tag `proxy`. Выберите сервер для запуска sing-box.")
+
+    if is_singbox_endpoint_node(node):
+        # WireGuard/AWG живут в top-level `endpoints[]`; плейсхолдер `proxy`
+        # из outbounds обязан удаляться, иначе sing-box падает на дубликате тега.
+        proxy_endpoint = build_singbox_outbound(node, tag="proxy")
+        assert isinstance(outbounds, list)
+        del outbounds[proxy_index]
+        _replace_or_append_tagged(_ensure_list(runtime_config, "endpoints"), "proxy", proxy_endpoint)
+        _ensure_proxy_server_bootstrap_contract(runtime_config, proxy_endpoint, node.server)
+        _validate_runtime_dns_contract(runtime_config)
+        return SingboxRuntimePlan(
+            outcome="native_singbox",
+            source_path=document.source_path,
+            text_hash=document.text_hash,
+            singbox_config=runtime_config,
+            has_proxy_outbound=True,
+            used_selected_node=True,
+            xray_sidecar=None,
+            requested_socks_port=requested_socks_port,
+            requested_http_port=requested_http_port,
+            socks_port=socks_port,
+            http_port=http_port,
+        )
 
     try:
         native_proxy = build_singbox_outbound(node, tag="proxy")
@@ -445,6 +470,11 @@ def _ensure_proxy_server_bootstrap_contract(
     preferred_server: str,
 ) -> None:
     server = str(preferred_server or proxy_outbound.get("server") or "").strip()
+    if not server:
+        # Endpoint-конфиги (wireguard) не имеют top-level `server` — адрес живёт в peers[0].
+        peers = proxy_outbound.get("peers")
+        if isinstance(peers, list) and peers and isinstance(peers[0], dict):
+            server = str(peers[0].get("address") or "").strip()
     if not _is_domain_name(server):
         return
 
@@ -634,6 +664,14 @@ def _validate_runtime_dns_contract(payload: dict[str, Any]) -> None:
             f"outbounds[{index}].domain_resolver",
         )
 
+    for index, endpoint in enumerate(payload.get("endpoints") or []):
+        if not isinstance(endpoint, dict):
+            continue
+        require_dns_tag(
+            _extract_dns_server_tag(endpoint.get("domain_resolver")),
+            f"endpoints[{index}].domain_resolver",
+        )
+
     if not missing_refs:
         return
 
@@ -655,7 +693,12 @@ def _find_proxy_outbound_index(outbounds: Any) -> int | None:
 
 
 def _config_has_proxy_outbound(payload: Any) -> bool:
-    return _find_proxy_outbound_index(payload.get("outbounds") if isinstance(payload, dict) else None) is not None
+    if not isinstance(payload, dict):
+        return False
+    if _find_proxy_outbound_index(payload.get("outbounds")) is not None:
+        return True
+    # Endpoint с тегом `proxy` (например, wireguard) тоже считается наличием proxy.
+    return _find_proxy_outbound_index(payload.get("endpoints")) is not None
 
 
 def _replace_or_append_tagged(items: list[Any], tag: str, payload: dict[str, Any]) -> None:

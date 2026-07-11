@@ -6,6 +6,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from .engines.singbox.config_builder import is_singbox_endpoint_node
 from .models import Node
 
 
@@ -22,6 +23,27 @@ def tcp_ping(host: str, port: int, timeout: float = 2.0) -> int | None:
             return int(elapsed)
     except OSError:
         return None
+
+
+def ping_node(node: Node, timeout: float = 2.0) -> int | None:
+    """TCP-пинг ноды; endpoint-ноды (UDP-only, напр. WireGuard/AWG) не пингуются."""
+    if is_singbox_endpoint_node(node):
+        return None
+    return tcp_ping(node.server, node.port, timeout)
+
+
+def apply_ping_measurement(node: Node, ping_ms: int | None) -> None:
+    """Применяет результат TCP-пинга к ноде.
+
+    Endpoint-ноды (UDP-only) не измеряются по TCP: ping_ms остаётся None,
+    is_alive не сбрасывается в False.
+    """
+    if is_singbox_endpoint_node(node):
+        node.ping_ms = None
+        return
+    node.ping_ms = ping_ms
+    if ping_ms is not None or node.is_alive is None:
+        node.is_alive = ping_ms is not None
 
 
 class PingWorker(QThread):
@@ -55,7 +77,7 @@ class PingWorker(QThread):
                 node = next(iterator, None)
                 if node is None:
                     break
-                future = executor.submit(tcp_ping, node.server, node.port, self._timeout)
+                future = executor.submit(ping_node, node, self._timeout)
                 pending[future] = node.id
 
             while pending and not self._cancelled:
@@ -79,7 +101,7 @@ class PingWorker(QThread):
 
                     next_node = next(iterator, None)
                     if next_node is not None:
-                        next_future = executor.submit(tcp_ping, next_node.server, next_node.port, self._timeout)
+                        next_future = executor.submit(ping_node, next_node, self._timeout)
                         pending[next_future] = next_node.id
 
             if self._cancelled:

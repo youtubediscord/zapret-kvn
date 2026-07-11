@@ -29,12 +29,23 @@ def _get_speed_url(country_code: str) -> str:
     return SPEED_TEST_URLS_BY_COUNTRY.get(country_code.lower(), SPEED_TEST_DEFAULT_URL)
 
 
+def should_skip_speed_test(node: Node) -> tuple[bool, str]:
+    """Тест скорости работает через временный xray — native sing-box ноды
+    (включая endpoint-ноды WireGuard/AWG) пропускаются мягко, без is_alive=False."""
+    outbound = node.outbound if isinstance(node.outbound, dict) else {}
+    if outbound.get("type") and not outbound.get("protocol"):
+        protocol = str(outbound.get("type") or node.scheme or "native").upper()
+        return True, f"Тест скорости для {node.name} пропущен: протокол {protocol} не поддерживается ядром xray."
+    return False, ""
+
+
 class SpeedTestWorker(QThread):
     """Тестирует скорость загрузки через каждый узел с помощью временного экземпляра xray."""
 
     result = pyqtSignal(str, object, bool)   # node_id, speed_mbps (float|None), is_alive
     progress = pyqtSignal(int, int)          # current, total
     node_progress = pyqtSignal(str, int)     # node_id, percent 0..100
+    skipped = pyqtSignal(str, str)           # node_id, короткое сообщение о пропуске
     completed = pyqtSignal()
 
     def __init__(
@@ -80,6 +91,12 @@ class SpeedTestWorker(QThread):
             for node in self._nodes:
                 if self._cancelled:
                     break
+                skip, skip_message = should_skip_speed_test(node)
+                if skip:
+                    self._completed_nodes += 1
+                    self.skipped.emit(node.id, skip_message)
+                    self.progress.emit(self._completed_nodes, total)
+                    continue
                 self.node_progress.emit(node.id, 0)
                 finished, speed, alive = self._test_node(node)
                 if not finished:
