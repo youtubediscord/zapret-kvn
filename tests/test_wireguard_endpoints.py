@@ -22,6 +22,7 @@ from xray_fluent.engines.singbox.runtime_planner import (
     parse_singbox_document,
     plan_singbox_proxy_runtime,
     plan_singbox_runtime,
+    select_endpoint_proxy_dns,
 )
 from xray_fluent.link_parser import (
     parse_links_text,
@@ -70,6 +71,37 @@ I1 = <b 0xf6ab5b>
 [Peer]
 PublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=
 Endpoint = 203.0.113.10:41820
+AllowedIPs = 0.0.0.0/0
+"""
+
+FIXTURE_WG_CONF_PRIVATE_DNS = """[Interface]
+PrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=
+Address = 10.66.66.2/32
+DNS = 10.64.0.1
+
+[Peer]
+PublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=
+Endpoint = wg.example.com:51820
+AllowedIPs = 0.0.0.0/0
+"""
+
+FIXTURE_WG_CONF_PUBLIC_DNS = """[Interface]
+PrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=
+Address = 10.8.0.78/32
+DNS = 1.1.1.1, 1.0.0.1
+
+[Peer]
+PublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=
+Endpoint = 144.31.213.169:44309
+AllowedIPs = 0.0.0.0/0
+"""
+
+FIXTURE_WG_CONF_NO_DNS_NO_ADDRESS = """[Interface]
+PrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=
+
+[Peer]
+PublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=
+Endpoint = wg.example.com:51820
 AllowedIPs = 0.0.0.0/0
 """
 
@@ -525,6 +557,171 @@ class WireguardDedupTests(unittest.TestCase):
         self.assertEqual(errors_again, [])
         self.assertEqual(added_again, 0)
         self.assertEqual(len(controller.state.nodes), 1)
+
+
+class WireguardDnsOverrideTests(unittest.TestCase):
+    """FAC1..FAC4, FAC6 — фикс P1: DNS через WG/AWG туннель (problems.md)."""
+
+    def _document(self):
+        return parse_singbox_document(
+            TEMPLATE_PATH,
+            TEMPLATE_PATH.read_text(encoding="utf-8"),
+        )
+
+    def _template_dns(self) -> dict:
+        return json.loads(TEMPLATE_PATH.read_text(encoding="utf-8"))["dns"]
+
+    def _proxy_dns_entry(self, plan) -> dict:
+        servers = plan.singbox_config["dns"]["servers"]
+        entries = [item for item in servers if item.get("tag") == "proxy-dns"]
+        self.assertEqual(len(entries), 1)
+        return entries[0]
+
+    def test_select_endpoint_proxy_dns_pure_function(self) -> None:
+        # 1) первый приватный (RFC1918/ULA) адрес из DNS=.
+        self.assertEqual(select_endpoint_proxy_dns(["10.64.0.1"], ["10.66.66.2/32"]), "10.64.0.1")
+        self.assertEqual(
+            select_endpoint_proxy_dns(["1.1.1.1", "10.64.0.1"], ["10.8.0.78/32"]),
+            "10.64.0.1",
+        )
+        self.assertEqual(select_endpoint_proxy_dns(["fd00::1"], []), "fd00::1")
+        # 2) шлюз из первого IPv4 CIDR; /32 считается /24, берётся первый хост.
+        self.assertEqual(select_endpoint_proxy_dns(None, ["10.8.0.78/32"]), "10.8.0.1")
+        self.assertEqual(
+            select_endpoint_proxy_dns(["1.1.1.1", "1.0.0.1"], ["10.8.0.78/32"]),
+            "10.8.0.1",
+        )
+        self.assertEqual(
+            select_endpoint_proxy_dns([], ["fd42:42:42::2/128", "10.66.66.2/24"]),
+            "10.66.66.1",
+        )
+        # 3) первый DNS как есть (нет пригодного IPv4 CIDR).
+        self.assertEqual(select_endpoint_proxy_dns(["1.1.1.1"], ["fd42::2/128"]), "1.1.1.1")
+        # 4) ничего не выбрано — шаблон не трогаем.
+        self.assertIsNone(select_endpoint_proxy_dns(None, None))
+        self.assertIsNone(select_endpoint_proxy_dns([], ["fd42::2/128"]))
+
+    def test_fac1_private_conf_dns_overrides_proxy_dns(self) -> None:
+        nodes, errors = parse_links_text(FIXTURE_WG_CONF_PRIVATE_DNS)
+        self.assertEqual(errors, [])
+        node = nodes[0]
+        self.assertEqual(node.outbound["_dns"], ["10.64.0.1"])
+
+        plan = plan_singbox_runtime(self._document(), node)
+        self.assertEqual(
+            self._proxy_dns_entry(plan),
+            {"tag": "proxy-dns", "type": "udp", "server": "10.64.0.1", "detour": "proxy"},
+        )
+        endpoints = plan.singbox_config["endpoints"]
+        proxies = [item for item in endpoints if item.get("tag") == "proxy"]
+        self.assertEqual(len(proxies), 1)
+        self.assertNotIn("_dns", proxies[0])
+        self.assertFalse(any(str(key).startswith("_") for key in proxies[0]))
+
+    def test_fac2_gateway_derived_from_interface_address(self) -> None:
+        nodes, errors = parse_links_text(FIXTURE_WG_CONF_PUBLIC_DNS)
+        self.assertEqual(errors, [])
+        node = nodes[0]
+        self.assertEqual(node.outbound["_dns"], ["1.1.1.1", "1.0.0.1"])
+
+        plan = plan_singbox_runtime(self._document(), node)
+        self.assertEqual(
+            self._proxy_dns_entry(plan),
+            {"tag": "proxy-dns", "type": "udp", "server": "10.8.0.1", "detour": "proxy"},
+        )
+
+    def test_fac3_no_dns_and_no_address_keeps_template_dns(self) -> None:
+        nodes, errors = parse_links_text(FIXTURE_WG_CONF_NO_DNS_NO_ADDRESS)
+        self.assertEqual(errors, [])
+        node = nodes[0]
+        self.assertNotIn("_dns", node.outbound)
+        self.assertNotIn("address", node.outbound)
+
+        plan = plan_singbox_runtime(self._document(), node)
+        self.assertEqual(plan.singbox_config["dns"], self._template_dns())
+
+    def test_fac4_dns_override_plans_pass_singbox_check(self) -> None:
+        if not SINGBOX_CORE.is_file():
+            self.skipTest("bundled sing-box.exe is not present")
+        wg = parse_links_text(FIXTURE_WG_CONF_PUBLIC_DNS)[0][0]
+        awg = _parse_awg_node()
+        for node in (wg, awg):
+            for label, plan in (
+                ("tun", plan_singbox_runtime(self._document(), node)),
+                (
+                    "proxy",
+                    plan_singbox_proxy_runtime(
+                        self._document(),
+                        node,
+                        allowed_proxy_ports={1390, 1391},
+                    ),
+                ),
+            ):
+                with self.subTest(scheme=node.scheme, plan=label):
+                    entry = self._proxy_dns_entry(plan)
+                    self.assertEqual(entry["type"], "udp")
+                    self.assertEqual(entry["detour"], "proxy")
+                    result = _run_singbox_check(plan.singbox_config)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_fac6_non_endpoint_plans_keep_template_dns(self) -> None:
+        vless = parse_single(
+            "vless://2DD61D93-75D8-4DA4-AC0E-6AECE7EAC365@example.com:443"
+            "?type=tcp&security=tls#Regression"
+        )
+        template_dns_text = json.dumps(self._template_dns(), sort_keys=True)
+        tun_plan = plan_singbox_runtime(self._document(), vless)
+        proxy_plan = plan_singbox_proxy_runtime(
+            self._document(),
+            vless,
+            allowed_proxy_ports={1390, 1391},
+        )
+        for plan in (tun_plan, proxy_plan):
+            self.assertEqual(
+                json.dumps(plan.singbox_config["dns"], sort_keys=True),
+                template_dns_text,
+            )
+
+
+class AwgOddHexValidationTests(unittest.TestCase):
+    """FAC5 — фикс P2: нечётная hex-длина в I1..I5/J1..J3 (problems.md)."""
+
+    def _awg_node(self, **amnezia_overrides) -> Node:
+        amnezia = {"jc": 5, "jmin": 50, "jmax": 1000}
+        amnezia.update(amnezia_overrides)
+        return Node(
+            name="awg",
+            outbound={
+                "type": "wireguard",
+                "private_key": "x",
+                "peers": [{"address": "1.2.3.4", "port": 51820, "public_key": "pk"}],
+                "amnezia": amnezia,
+            },
+        )
+
+    def test_fac5_odd_hex_length_is_rejected(self) -> None:
+        problem = validate_node_outbound(self._awg_node(i1="<b 0xf6ab5>"))
+        self.assertEqual(problem, "AWG: нечётное число hex-символов в I1.")
+
+        problem = validate_node_outbound(
+            self._awg_node(j2="<b 0xaa><b 0xbbb>")
+        )
+        self.assertEqual(problem, "AWG: нечётное число hex-символов в J2.")
+
+    def test_fac5_even_or_absent_hex_passes(self) -> None:
+        self.assertIsNone(validate_node_outbound(self._awg_node(i1="<b 0xf6ab5b>")))
+        self.assertIsNone(validate_node_outbound(self._awg_node()))
+        # Значение без <b 0x...> тегов не трогаем.
+        self.assertIsNone(validate_node_outbound(self._awg_node(i2="<c 100-500>")))
+        # Конф из спеки (чётный hex) остаётся валидным.
+        self.assertIsNone(validate_node_outbound(_parse_awg_node()))
+
+    def test_fac5_odd_hex_from_conf_import(self) -> None:
+        conf = FIXTURE_AWG_CONF.replace("I1 = <b 0xf6ab5b>", "I1 = <b 0xf6ab5>")
+        nodes, errors = parse_links_text(conf)
+        self.assertEqual(errors, [])
+        problem = validate_node_outbound(nodes[0])
+        self.assertEqual(problem, "AWG: нечётное число hex-символов в I1.")
 
 
 class WireguardRegressionTests(unittest.TestCase):

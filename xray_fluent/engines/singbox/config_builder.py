@@ -28,6 +28,9 @@ def build_singbox_outbound(node, *, tag: str = "proxy") -> dict[str, Any]:
     protocol = str(source.get("protocol") or "").lower()
     native_type = str(source.get("type") or "").lower()
     if native_type and not protocol:
+        # Служебные ключи приложения (`_dns` и прочие с префиксом `_`) не входят
+        # в схему sing-box, строгий декодер их отвергает — отбрасываем.
+        source = {key: value for key, value in source.items() if not str(key).startswith("_")}
         source["tag"] = tag
         return source
 

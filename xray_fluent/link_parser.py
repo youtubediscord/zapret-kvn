@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -424,6 +425,15 @@ def validate_node_outbound(node: Node) -> str | None:
                     value = amnezia.get(key)
                     if value is not None and not isinstance(value, int):
                         return f"Сервер {node_label}: параметр amnezia `{key}` должен быть числом."
+                # Нечётное число hex-символов в тегах <b 0x...> валидно для
+                # `sing-box check`, но роняет рантайм (IPC error -22).
+                for key in _AMNEZIA_STR_KEYS:
+                    value = amnezia.get(key)
+                    if not isinstance(value, str):
+                        continue
+                    for match in _AWG_BYTES_TAG_RE.finditer(value):
+                        if len(match.group(1)) % 2 != 0:
+                            return f"AWG: нечётное число hex-символов в {key.upper()}."
             return None
         if native_type in {"hysteria", "hysteria2", "tuic"}:
             server = str(outbound.get("server") or "").strip()
@@ -868,6 +878,9 @@ _AMNEZIA_INT_KEYS = ("jc", "jmin", "jmax", "s1", "s2", "s3", "s4", "itime")
 _AMNEZIA_INT_OR_STR_KEYS = ("h1", "h2", "h3", "h4")
 _AMNEZIA_STR_KEYS = ("i1", "i2", "i3", "i4", "i5", "j1", "j2", "j3")
 
+# Тег <b 0xHEX> внутри amnezia i1..i5 / j1..j3.
+_AWG_BYTES_TAG_RE = re.compile(r"<b\s+0x([0-9A-Fa-f]*)>")
+
 
 def _looks_like_wireguard_conf(text: str) -> bool:
     return any(line.strip().lower() == "[interface]" for line in text.splitlines())
@@ -987,6 +1000,12 @@ def _parse_wireguard_conf(text: str) -> Node:
     amnezia = _parse_amnezia_params(interface)
     if amnezia:
         outbound["amnezia"] = amnezia
+
+    # `DNS =` из [Interface] сохраняем вне схемы sing-box (ключ с префиксом `_`
+    # отбрасывается в build_singbox_outbound перед инъекцией в endpoints[]).
+    dns_servers = [item.strip() for item in interface.get("dns", "").split(",") if item.strip()]
+    if dns_servers:
+        outbound["_dns"] = dns_servers
 
     scheme = "awg" if amnezia else "wireguard"
     server = str(peers[0].get("address") or "")

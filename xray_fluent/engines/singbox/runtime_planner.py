@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
+import ipaddress
 from ipaddress import ip_address
 import json
 import secrets
@@ -244,6 +245,16 @@ def _plan_runtime_outbound(
         del outbounds[proxy_index]
         _replace_or_append_tagged(_ensure_list(runtime_config, "endpoints"), "proxy", proxy_endpoint)
         _ensure_proxy_server_bootstrap_contract(runtime_config, proxy_endpoint, node.server)
+        # Amnezia-серверы перехватывают порт 53 внутри туннеля: шаблонный
+        # proxy-dns (tcp 8.8.8.8) получает REFUSED. Переключаемся на резолвер
+        # туннеля (DNS= из .conf либо шлюз подсети интерфейса).
+        node_outbound = node.outbound if isinstance(node.outbound, dict) else {}
+        dns_override = select_endpoint_proxy_dns(
+            node_outbound.get("_dns"),
+            proxy_endpoint.get("address"),
+        )
+        if dns_override:
+            _override_proxy_dns_server(runtime_config, dns_override)
         _validate_runtime_dns_contract(runtime_config)
         return SingboxRuntimePlan(
             outcome="native_singbox",
@@ -625,6 +636,67 @@ def _ensure_singbox_proxy_runtime_contract(
         ]
     )
     return selection
+
+
+def select_endpoint_proxy_dns(
+    dns_values: list[str] | None,
+    endpoint_addresses: list[str] | None,
+) -> str | None:
+    """Выбор DNS-сервера туннеля для endpoint-нод (WG/AWG).
+
+    Порядок (см. problems.md P1):
+    1. первый ПРИВАТНЫЙ (RFC1918/ULA) адрес из `DNS =` conf'а;
+    2. иначе шлюз из первого IPv4 CIDR адреса интерфейса (/32 считается /24,
+       берётся первый хост сети: 10.8.0.78/32 -> 10.8.0.1);
+    3. иначе первый адрес из `DNS =` как есть;
+    4. иначе None — шаблонный proxy-dns не трогаем.
+    """
+    cleaned = [str(item).strip() for item in (dns_values or []) if str(item).strip()]
+
+    for item in cleaned:
+        try:
+            candidate = ipaddress.ip_address(item)
+        except ValueError:
+            continue
+        if candidate.is_private:
+            return item
+
+    for item in endpoint_addresses or []:
+        try:
+            interface = ipaddress.ip_interface(str(item).strip())
+        except ValueError:
+            continue
+        if interface.version != 4:
+            continue
+        network = interface.network
+        if network.prefixlen >= 31:
+            network = ipaddress.ip_network(f"{interface.ip}/24", strict=False)
+        try:
+            return str(next(network.hosts()))
+        except StopIteration:
+            continue
+
+    if cleaned:
+        return cleaned[0]
+    return None
+
+
+def _override_proxy_dns_server(payload: dict[str, Any], server: str) -> None:
+    dns = payload.get("dns")
+    if not isinstance(dns, dict):
+        return
+    servers = dns.get("servers")
+    if not isinstance(servers, list):
+        return
+    for index, item in enumerate(servers):
+        if isinstance(item, dict) and str(item.get("tag") or "") == "proxy-dns":
+            servers[index] = {
+                "tag": "proxy-dns",
+                "type": "udp",
+                "server": server,
+                "detour": "proxy",
+            }
+            return
 
 
 def _validate_runtime_dns_contract(payload: dict[str, Any]) -> None:
