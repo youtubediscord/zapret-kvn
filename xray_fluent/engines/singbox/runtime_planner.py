@@ -10,8 +10,10 @@ import socket
 from pathlib import Path
 from typing import Any
 
-from ...application.runtime_security import generate_local_proxy_credentials, strip_singbox_proxy_inbounds
+from ...runtime_security import generate_local_proxy_credentials, strip_singbox_proxy_inbounds
 from ...constants import (
+    DEFAULT_HTTP_PORT,
+    DEFAULT_SOCKS_PORT,
     PROXY_HOST,
     SINGBOX_CLASH_API_PORT,
     SINGBOX_XRAY_RELAY_PORT,
@@ -26,6 +28,15 @@ _SS_PROTECT_METHOD = "chacha20-ietf-poly1305"
 _APP_SINGBOX_HYBRID_PROTECT_INBOUND_TAG = "__app_hybrid_protect_in"
 _APP_XRAY_SIDECAR_RELAY_INBOUND_TAG = "__app_hybrid_relay_in"
 _APP_XRAY_SIDECAR_PROTECT_OUTBOUND_TAG = "__app_hybrid_protect_out"
+_PUBLIC_PROXY_LISTEN = "0.0.0.0"
+
+
+@dataclass(frozen=True, slots=True)
+class _ProxyPortSelection:
+    requested_socks_port: int
+    requested_http_port: int
+    socks_port: int
+    http_port: int
 
 
 @dataclass(slots=True)
@@ -66,10 +77,25 @@ class SingboxRuntimePlan:
     has_proxy_outbound: bool
     used_selected_node: bool
     xray_sidecar: SingboxXraySidecarPlan | None
+    requested_socks_port: int = 0
+    requested_http_port: int = 0
+    socks_port: int = 0
+    http_port: int = 0
 
     @property
     def is_hybrid(self) -> bool:
         return self.outcome == "hybrid_xray_sidecar"
+
+    @property
+    def proxy_ports_changed(self) -> bool:
+        return (
+            self.requested_socks_port > 0
+            and self.requested_http_port > 0
+            and (
+                self.socks_port != self.requested_socks_port
+                or self.http_port != self.requested_http_port
+            )
+        )
 
 
 def inspect_singbox_document_text(source_path: Path, text: str) -> SingboxDocumentState:
@@ -130,6 +156,63 @@ def plan_singbox_runtime(
     _ensure_singbox_metrics_contract(runtime_config)
     _ensure_singbox_tun_runtime_contract(runtime_config)
 
+    return _plan_runtime_outbound(
+        document,
+        runtime_config=runtime_config,
+        node=node,
+        preferred_relay_port=preferred_relay_port,
+        preferred_protect_port=preferred_protect_port,
+        preferred_protect_password=preferred_protect_password,
+    )
+
+
+def plan_singbox_proxy_runtime(
+    document: ParsedSingboxDocument,
+    node: Node | None,
+    *,
+    allowed_proxy_ports: set[int] | None = None,
+    preferred_relay_port: int = 0,
+    preferred_protect_port: int = 0,
+    preferred_protect_password: str = "",
+) -> SingboxRuntimePlan:
+    """Build the app-owned SOCKS/HTTP runtime from a raw sing-box profile."""
+    runtime_config = deepcopy(document.payload)
+    strip_singbox_proxy_inbounds(runtime_config)
+    _strip_singbox_tun_inbounds(runtime_config)
+    selection = _ensure_singbox_proxy_runtime_contract(
+        runtime_config,
+        allowed_proxy_ports=allowed_proxy_ports,
+    )
+    _ensure_singbox_metrics_contract(runtime_config)
+
+    return _plan_runtime_outbound(
+        document,
+        runtime_config=runtime_config,
+        node=node,
+        preferred_relay_port=preferred_relay_port,
+        preferred_protect_port=preferred_protect_port,
+        preferred_protect_password=preferred_protect_password,
+        requested_socks_port=selection.requested_socks_port,
+        requested_http_port=selection.requested_http_port,
+        socks_port=selection.socks_port,
+        http_port=selection.http_port,
+    )
+
+
+def _plan_runtime_outbound(
+    document: ParsedSingboxDocument,
+    *,
+    runtime_config: dict[str, Any],
+    node: Node | None,
+    preferred_relay_port: int,
+    preferred_protect_port: int,
+    preferred_protect_password: str,
+    requested_socks_port: int = 0,
+    requested_http_port: int = 0,
+    socks_port: int = 0,
+    http_port: int = 0,
+) -> SingboxRuntimePlan:
+
     outbounds = runtime_config.get("outbounds")
     proxy_index = _find_proxy_outbound_index(outbounds)
     if proxy_index is None:
@@ -142,6 +225,10 @@ def plan_singbox_runtime(
             has_proxy_outbound=False,
             used_selected_node=False,
             xray_sidecar=None,
+            requested_socks_port=requested_socks_port,
+            requested_http_port=requested_http_port,
+            socks_port=socks_port,
+            http_port=http_port,
         )
 
     if node is None:
@@ -158,6 +245,10 @@ def plan_singbox_runtime(
             preferred_relay_port=preferred_relay_port,
             preferred_protect_port=preferred_protect_port,
             preferred_protect_password=preferred_protect_password,
+            requested_socks_port=requested_socks_port,
+            requested_http_port=requested_http_port,
+            socks_port=socks_port,
+            http_port=http_port,
         )
 
     assert isinstance(outbounds, list)
@@ -172,6 +263,10 @@ def plan_singbox_runtime(
         has_proxy_outbound=True,
         used_selected_node=True,
         xray_sidecar=None,
+        requested_socks_port=requested_socks_port,
+        requested_http_port=requested_http_port,
+        socks_port=socks_port,
+        http_port=http_port,
     )
 
 
@@ -184,6 +279,10 @@ def _plan_hybrid_runtime(
     preferred_relay_port: int,
     preferred_protect_port: int,
     preferred_protect_password: str,
+    requested_socks_port: int = 0,
+    requested_http_port: int = 0,
+    socks_port: int = 0,
+    http_port: int = 0,
 ) -> SingboxRuntimePlan:
     relay_port = preferred_relay_port if preferred_relay_port > 0 else _find_free_port(preferred=SINGBOX_XRAY_RELAY_PORT)
     excluded_ports = {relay_port}
@@ -247,6 +346,10 @@ def _plan_hybrid_runtime(
         has_proxy_outbound=True,
         used_selected_node=True,
         xray_sidecar=sidecar,
+        requested_socks_port=requested_socks_port,
+        requested_http_port=requested_http_port,
+        socks_port=socks_port,
+        http_port=http_port,
     )
 
 
@@ -409,6 +512,89 @@ def _ensure_singbox_tun_runtime_contract(payload: dict[str, Any]) -> None:
         if str(inbound.get("type") or "").strip().lower() != "tun":
             continue
         inbound["interface_name"] = _generate_tun_interface_name()
+
+
+def _strip_singbox_tun_inbounds(payload: dict[str, Any]) -> int:
+    inbounds = payload.get("inbounds")
+    if not isinstance(inbounds, list):
+        return 0
+    filtered: list[Any] = []
+    removed = 0
+    for inbound in inbounds:
+        if isinstance(inbound, dict) and str(inbound.get("type") or "").strip().lower() == "tun":
+            removed += 1
+            continue
+        filtered.append(inbound)
+    if removed:
+        payload["inbounds"] = filtered
+    return removed
+
+
+def _ensure_singbox_proxy_runtime_contract(
+    payload: dict[str, Any],
+    *,
+    allowed_proxy_ports: set[int] | None,
+) -> _ProxyPortSelection:
+    inbounds = _ensure_list(payload, "inbounds")
+    excluded_ports: set[int] = set()
+    for inbound in inbounds:
+        if not isinstance(inbound, dict):
+            continue
+        try:
+            port = int(inbound.get("listen_port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        if port > 0:
+            excluded_ports.add(port)
+
+    allowed = {int(port) for port in (allowed_proxy_ports or set()) if int(port) > 0}
+
+    def port_available(port: int) -> bool:
+        if port in excluded_ports:
+            return False
+        if port in allowed:
+            return True
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.bind((_PUBLIC_PROXY_LISTEN, port))
+            return True
+        except OSError:
+            return False
+
+    selection: _ProxyPortSelection | None = None
+    for attempt in range(500):
+        socks_port = DEFAULT_SOCKS_PORT + attempt * 2
+        http_port = DEFAULT_HTTP_PORT + attempt * 2
+        if http_port > 65535:
+            break
+        if port_available(socks_port) and port_available(http_port):
+            selection = _ProxyPortSelection(
+                requested_socks_port=DEFAULT_SOCKS_PORT,
+                requested_http_port=DEFAULT_HTTP_PORT,
+                socks_port=socks_port,
+                http_port=http_port,
+            )
+            break
+    if selection is None:
+        raise ValueError("Не удалось подобрать свободные локальные SOCKS/HTTP порты для sing-box.")
+
+    inbounds.extend(
+        [
+            {
+                "type": "socks",
+                "tag": "socks-in",
+                "listen": _PUBLIC_PROXY_LISTEN,
+                "listen_port": selection.socks_port,
+            },
+            {
+                "type": "http",
+                "tag": "http-in",
+                "listen": _PUBLIC_PROXY_LISTEN,
+                "listen_port": selection.http_port,
+            },
+        ]
+    )
+    return selection
 
 
 def _validate_runtime_dns_contract(payload: dict[str, Any]) -> None:

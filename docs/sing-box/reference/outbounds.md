@@ -2,8 +2,10 @@
 
 Целевая версия: sing-box 1.14.x
 
-Документированы только типы, которые использует XrayFluent: vless, vmess,
-trojan, shadowsocks, socks, http, direct, block.
+Ниже подробно документирован исторический конвертируемый набор: vless, vmess,
+trojan, shadowsocks, socks, http, direct, block. Hysteria, Hysteria2 и TUIC
+импортируются как native sing-box outbounds; остальные типы sing-box extended
+можно импортировать объектом `{"type": ...}` без преобразования в Xray JSON.
 
 ---
 

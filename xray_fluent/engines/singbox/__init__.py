@@ -2,7 +2,7 @@
 
 from .config_builder import build_singbox_outbound
 from .manager import SingBoxManager, get_singbox_version
-from .operations import restart_runtime, start_tun
+from .operations import restart_proxy_runtime, restart_runtime, start_proxy, start_tun
 from .runtime_planner import (
     ParsedSingboxDocument,
     SingboxDocumentState,
@@ -11,6 +11,7 @@ from .runtime_planner import (
     classify_node_for_singbox,
     inspect_singbox_document_text,
     parse_singbox_document,
+    plan_singbox_proxy_runtime,
     plan_singbox_runtime,
 )
 
@@ -19,6 +20,8 @@ __all__ = [
     "SingBoxManager",
     "get_singbox_version",
     "restart_runtime",
+    "restart_proxy_runtime",
+    "start_proxy",
     "start_tun",
     "ParsedSingboxDocument",
     "SingboxDocumentState",
@@ -27,5 +30,6 @@ __all__ = [
     "classify_node_for_singbox",
     "inspect_singbox_document_text",
     "parse_singbox_document",
+    "plan_singbox_proxy_runtime",
     "plan_singbox_runtime",
 ]

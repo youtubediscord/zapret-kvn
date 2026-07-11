@@ -179,6 +179,7 @@ class AppSettings:
     xray_update_feed_url: str = ""
     xray_auto_update: bool = False
     tun_mode: bool = False
+    proxy_engine: str = "singbox"  # "singbox" | "xray"
     tun_engine: str = "singbox"  # "singbox" | "xray" | "tun2socks"
     xray_config_file: str = ""
     xray_template_file: str = ""
@@ -216,6 +217,7 @@ class AppSettings:
             "xray_update_feed_url": self.xray_update_feed_url,
             "xray_auto_update": self.xray_auto_update,
             "tun_mode": self.tun_mode,
+            "proxy_engine": self.proxy_engine,
             "tun_engine": self.tun_engine,
             "xray_config_file": self.xray_config_file,
             "xray_template_file": self.xray_template_file,
@@ -255,6 +257,7 @@ class AppSettings:
             xray_update_feed_url=str(data.get("xray_update_feed_url") or ""),
             xray_auto_update=bool(data.get("xray_auto_update", False)),
             tun_mode=bool(data.get("tun_mode", False)),
+            proxy_engine=str(data.get("proxy_engine") or "singbox"),
             tun_engine=str(data.get("tun_engine") or "singbox"),
             xray_config_file=str(data.get("xray_config_file") or ""),
             xray_template_file=str(data.get("xray_template_file") or ""),

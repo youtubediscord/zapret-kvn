@@ -16,6 +16,19 @@ class XrayStartResult:
     session_label: str
 
 
+def _notify_proxy_port_change(controller: AppController, runtime: XrayRuntimeConfig) -> None:
+    if not runtime.proxy_ports_changed:
+        return
+    message = (
+        "Локальные порты Xray изменены: "
+        f"SOCKS {runtime.requested_socks_port} -> {runtime.socks_port}, "
+        f"HTTP {runtime.requested_http_port} -> {runtime.http_port}. "
+        "Исходные порты заняты или зарезервированы Windows."
+    )
+    controller._log(f"[xray] {message}")
+    controller.status.emit("warning-long", message)
+
+
 def start_tun(
     controller: AppController,
     node: Node | None,
@@ -34,6 +47,7 @@ def start_tun(
     if runtime.used_selected_node and node is not None:
         session_label = f"{runtime.source_path.name} / {node.name}"
     controller._set_connection_status("starting", f"Запуск VPN: {session_label}...", level="info")
+    _notify_proxy_port_change(controller, runtime)
     controller._log(f"[tun] starting xray TUN from {runtime.source_path}")
     if runtime.used_selected_node and node is not None:
         controller._log(f"[tun] outbound tag 'proxy' replaced from selected node: {node.name}")
@@ -81,6 +95,7 @@ def start_proxy(
     if runtime.used_selected_node and node is not None:
         session_label = f"{runtime.source_path.name} / {node.name}"
     controller._set_connection_status("starting", f"Запуск прокси: {session_label}...", level="info")
+    _notify_proxy_port_change(controller, runtime)
     if runtime.used_selected_node and node is not None:
         controller._log(f"[xray] outbound tag 'proxy' replaced from selected node: {node.name}")
 
@@ -131,6 +146,7 @@ def restart_proxy_core(controller: AppController, reason: str) -> bool:
         if runtime.used_selected_node and node is not None:
             session_label = f"{runtime.source_path.name} / {node.name}"
         controller._set_connection_status("starting", f"Переключение на {session_label}...", level="info")
+        _notify_proxy_port_change(controller, runtime)
         controller._stop_metrics_worker()
         if controller.xray.is_running and not controller.xray.stop():
             controller._set_connection_status("error", "Не удалось остановить предыдущий процесс Xray", level="error")

@@ -10,11 +10,19 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: windows-x64-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  CORE_BUNDLE: .cache/core-bundle/core-windows-x64.7z
+
 jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -48,90 +56,69 @@ jobs:
           Get-Content $file | Select-String "APP_VERSION"
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        id: setup-python
+        uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Cache Windows virtualenv
+        id: venv-cache
+        uses: actions/cache@v6
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('requirements.txt') }}
 
-      - name: Download core binaries
+      - name: Prepare build environment
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path core | Out-Null
+          if (-not (Test-Path .venv/Scripts/python.exe)) {
+            python -m venv .venv
+            .venv/Scripts/python.exe -m pip install --upgrade pip
+            .venv/Scripts/python.exe -m pip install -r requirements.txt
+          }
+          .venv/Scripts/python.exe -m pip check
 
-          # ── Xray-core ──
-          Write-Host "Downloading Xray-core..."
-          $xrayRelease = Invoke-RestMethod "https://api.github.com/repos/XTLS/Xray-core/releases/latest"
-          $xrayAsset = $xrayRelease.assets | Where-Object { $_.name -match "Xray-windows-64\.zip$" }
-          Invoke-WebRequest $xrayAsset.browser_download_url -OutFile xray.zip
-          Expand-Archive xray.zip -DestinationPath _xray -Force
-          Copy-Item _xray/xray.exe core/
-          Copy-Item _xray/geoip.dat core/
-          Copy-Item _xray/geosite.dat core/
-          Remove-Item -Recurse _xray, xray.zip
+      - name: Cache PyInstaller binary cache
+        uses: actions/cache@v6
+        with:
+          path: ~\AppData\Local\pyinstaller
+          key: pyinstaller-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('requirements.txt') }}
 
-          # ── tun2socks ──
-          Write-Host "Downloading tun2socks..."
-          $tunRelease = Invoke-RestMethod "https://api.github.com/repos/xjasonlyu/tun2socks/releases/latest"
-          $tunAsset = $tunRelease.assets | Where-Object { $_.name -match "windows-amd64\.zip$" }
-          Invoke-WebRequest $tunAsset.browser_download_url -OutFile tun2socks.zip
-          Expand-Archive tun2socks.zip -DestinationPath _tun -Force
-          Get-ChildItem _tun -Recurse -Filter "*.exe" | ForEach-Object { Copy-Item $_.FullName core/tun2socks.exe }
-          Remove-Item -Recurse _tun, tun2socks.zip
+      - name: Cache Windows x64 core bundle
+        id: core-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.CORE_BUNDLE }}
+          key: cores-windows-x64-${{ hashFiles('scripts/core-lock.windows-x64.json') }}
 
-          # ── wintun ──
-          Write-Host "Downloading wintun..."
-          Invoke-WebRequest "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile wintun.zip
-          Expand-Archive wintun.zip -DestinationPath _wintun -Force
-          Copy-Item _wintun/wintun/bin/amd64/wintun.dll core/
-          Remove-Item -Recurse _wintun, wintun.zip
-
-          # ── sing-box (latest, including pre-release) ──
-          Write-Host "Downloading sing-box..."
-          $sbReleases = Invoke-RestMethod "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=10"
-          $sbRelease = $sbReleases | Where-Object { -not $_.draft } | Select-Object -First 1
-          Write-Host "Using sing-box $($sbRelease.tag_name)"
-          $sbAsset = $sbRelease.assets | Where-Object { $_.name -match "windows-amd64\.zip$" -and $_.name -notmatch "\.sig" }
-          Invoke-WebRequest $sbAsset.browser_download_url -OutFile singbox.zip
-          Expand-Archive singbox.zip -DestinationPath _sb -Force
-          Get-ChildItem _sb -Recurse -Filter "sing-box.exe" | ForEach-Object { Copy-Item $_.FullName core/sing-box.exe }
-          Remove-Item -Recurse _sb, singbox.zip
-
-          Write-Host "Core binaries ready:"
-          Get-ChildItem core/
-
-      - name: Build with PyInstaller
+      - name: Build Windows x64 core bundle
+        if: steps.core-cache.outputs.cache-hit != 'true'
         shell: pwsh
-        run: |
-          python -m PyInstaller main.py `
-            --name ZapretKVN `
-            --noconfirm --clean --console --onedir `
-            --uac-admin `
-            --manifest uac_admin.manifest `
-            --hidden-import win32comext `
-            --hidden-import win32comext.shell `
-            --hidden-import win32comext.shell.shellcon `
-            --hidden-import encodings.idna
+        run: ./scripts/build_core_bundle.ps1 -OutputArchive $env:CORE_BUNDLE
 
-          Copy-Item -Recurse core dist/ZapretKVN/core
+      - name: Install and verify core bundle
+        shell: pwsh
+        run: ./scripts/install_core_bundle.ps1 -Archive $env:CORE_BUNDLE
 
-          # Copy zapret/ (presets, binaries, lists — tracked in git)
-          if (Test-Path zapret) {
-            Copy-Item -Recurse zapret dist/ZapretKVN/zapret
-          }
+      - name: Run unit tests
+        shell: pwsh
+        run: .venv/Scripts/python.exe -m unittest discover -s tests -v
 
-          # Copy raw config templates for first-run users
-          if (Test-Path data/templates) {
-            New-Item -ItemType Directory -Force -Path dist/ZapretKVN/data | Out-Null
-            Copy-Item -Recurse data/templates dist/ZapretKVN/data/templates
-          }
+      - name: Build with project builder
+        shell: pwsh
+        run: python build.py --no-zip
 
-          Write-Host "Build complete:"
-          Get-ChildItem dist/ZapretKVN/ | Format-Table Name, Length
+      - name: Upload core bundle artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ZapretKVN-cores-windows-x64
+          path: ${{ env.CORE_BUNDLE }}
+          compression-level: 0
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ZapretKVN-portable
           path: dist/ZapretKVN/
@@ -158,6 +145,7 @@ jobs:
           7z a -t7z -mx=5 "../ZapretKVN-v$env:VERSION-windows-x64.7z" *
 
           cd ..
+          Copy-Item "../$env:CORE_BUNDLE" "ZapretKVN-cores-v$env:VERSION-windows-x64.7z"
           Write-Host "Release archives:"
           Get-ChildItem *.exe, *.zip, *.7z, *.sha256 | Format-Table Name, Length
 
@@ -172,8 +160,9 @@ jobs:
           files: |
             dist/ZapretKVN-*-windows-x64.exe
             dist/ZapretKVN-*-windows-x64.zip
-            dist/ZapretKVN-*-windows-x64.7z
+            dist/ZapretKVN-v*-windows-x64.7z
             dist/ZapretKVN-*-windows-x64.zip.sha256
+            dist/ZapretKVN-cores-*-windows-x64.7z
 
       - name: Commit version bump
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'

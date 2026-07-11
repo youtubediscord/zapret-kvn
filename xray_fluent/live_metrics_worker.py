@@ -13,7 +13,7 @@ _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from .constants import XRAY_PATH_DEFAULT
+from .constants import DEFAULT_HTTP_PORT, DEFAULT_SOCKS_PORT, XRAY_PATH_DEFAULT
 from .path_utils import resolve_configured_path
 from .ping_worker import tcp_ping
 from .process_traffic_collector import collect_process_stats, ProcessTrafficSnapshot
@@ -34,8 +34,8 @@ class LiveMetricsWorker(QThread):
         ping_interval_sec: float = 3.0,
         mode: str = "xray",
         clash_api_port: int = 19090,
-        socks_port: int = 10808,
-        http_port: int = 10809,
+        socks_port: int = DEFAULT_SOCKS_PORT,
+        http_port: int = DEFAULT_HTTP_PORT,
         xray_inbound_tags: list[str] | None = None,
     ):
         super().__init__()

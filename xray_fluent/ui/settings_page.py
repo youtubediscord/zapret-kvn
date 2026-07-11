@@ -233,6 +233,16 @@ class SettingsPage(QWidget):
             parent=paths_group,
         )
 
+        self.proxy_engine_card = _ComboCard(
+            FIF.DEVELOPER_TOOLS, "Движок прокси",
+            "sing-box extended поддерживает native-протоколы; Xray остаётся совместимым резервным движком",
+            [
+                ("sing-box extended (recommended)", "singbox"),
+                ("Xray", "xray"),
+            ],
+            parent=paths_group,
+        )
+
         self.tun_engine_card = _ComboCard(
             FIF.DEVELOPER_TOOLS, "Движок TUN",
             "sing-box — рекомендуемый TUN engine; xray — experimental native TUN; tun2socks — отдельный fallback engine",
@@ -246,6 +256,7 @@ class SettingsPage(QWidget):
 
         paths_group.addSettingCard(self.xray_path_card)
         paths_group.addSettingCard(self.singbox_path_card)
+        paths_group.addSettingCard(self.proxy_engine_card)
         paths_group.addSettingCard(self.tun_engine_card)
         root.addWidget(paths_group)
 
@@ -369,6 +380,7 @@ class SettingsPage(QWidget):
         self.proxy_bypass_lan_card.checkedChanged.connect(self._auto_save)
         self.xray_path_card.edit.editingFinished.connect(self._auto_save)
         self.singbox_path_card.edit.editingFinished.connect(self._auto_save)
+        self.proxy_engine_card.combo.currentIndexChanged.connect(self._auto_save)
         self.tun_engine_card.combo.currentIndexChanged.connect(self._auto_save)
 
         self.launch_card.checkedChanged.connect(self._auto_save)
@@ -412,6 +424,7 @@ class SettingsPage(QWidget):
                 migrate_default_location=True,
             )
         )
+        self._select_combo_data(self.proxy_engine_card.combo, settings.proxy_engine)
         self._select_combo_data(self.tun_engine_card.combo, settings.tun_engine)
         self.launch_card.setChecked(settings.launch_on_startup)
         self.reconnect_card.setChecked(settings.reconnect_on_network_change)
@@ -502,6 +515,7 @@ class SettingsPage(QWidget):
         )
         self.xray_path_card.edit.setText(data.xray_path)
         self.singbox_path_card.edit.setText(data.singbox_path)
+        data.proxy_engine = self.proxy_engine_card.combo.currentData() or "singbox"
         data.tun_engine = self.tun_engine_card.combo.currentData() or "singbox"
         data.start_minimized = False
         data.launch_on_startup = self.launch_card.isChecked()

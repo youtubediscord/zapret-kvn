@@ -1,4 +1,0 @@
-strategy_name=Оригинальная bol-van v2 (07.04.2025)
-strategy_id=original_bolvan_2
-bat_file=C:\root\bin\zapretgui\dist\bin\original_bolvan_v2.bat
-installed=2025-04-23 22:41:58

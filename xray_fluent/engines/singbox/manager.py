@@ -46,6 +46,7 @@ class SingBoxManager(QObject):
         self._last_output_lines: deque[str] = deque(maxlen=20)
         self._last_exit_code: int | None = None
         self._last_exit_status = QProcess.ExitStatus.NormalExit
+        self._uses_tun = False
 
     @property
     def is_running(self) -> bool:
@@ -66,9 +67,7 @@ class SingBoxManager(QObject):
             return False
 
         tun_interface_name = self._extract_tun_interface_name(config)
-        if not tun_interface_name:
-            self.error.emit("sing-box config does not contain a TUN inbound interface_name")
-            return False
+        uses_tun = bool(tun_interface_name)
 
         RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
         SINGBOX_CONFIG_FILE.write_text(
@@ -83,8 +82,9 @@ class SingBoxManager(QObject):
             self._running = False
             self.state_changed.emit(False)
 
-        # Kill any orphaned sing-box processes to free the TUN adapter
+        # Kill an orphaned process before reusing its ports or TUN adapter.
         self._kill_orphaned(exe)
+        self._uses_tun = uses_tun
 
         # Set working directory to core/ so sing-box can find wintun.dll
         core_dir = exe.parent
@@ -93,7 +93,30 @@ class SingBoxManager(QObject):
         self._runtime_error_reported = False
         self._last_output_lines.clear()
 
-        # Try up to 3 times — wintun adapter may need time to be released
+        # Proxy mode has no adapter to wait for. Keep a short settling window so
+        # an invalid config can exit and report its last log line before success.
+        if not tun_interface_name:
+            self._last_output_lines.clear()
+            self._process.setWorkingDirectory(str(core_dir))
+            self._process.setProgram(str(exe))
+            self._process.setArguments(["run", "-c", str(SINGBOX_CONFIG_FILE), "-D", str(core_dir)])
+            self._process.start()
+            if not wait_for_qprocess_started(self._process, 4000):
+                self._starting = False
+                self._report_startup_failure(f"failed to start sing-box process: {self._process.errorString()}")
+                return False
+            sleep_with_events(0.75)
+            if self._process.state() == QProcess.ProcessState.NotRunning:
+                self._starting = False
+                self._report_startup_failure(
+                    self._unexpected_exit_message(self._last_exit_code, self._last_exit_status, startup=True)
+                )
+                return False
+            self._starting = False
+            self._mark_running()
+            return True
+
+        # TUN mode retries while Windows releases a previous wintun adapter.
         for attempt in range(3):
             self._last_output_lines.clear()
             self._process.setWorkingDirectory(str(core_dir))
@@ -153,8 +176,10 @@ class SingBoxManager(QObject):
                 self._running = False
                 self.state_changed.emit(False)
             self._starting = False
+            self._uses_tun = False
             return True
 
+        used_tun = self._uses_tun
         self._stop_requested = expected
         self._process.terminate()
         if not wait_for_qprocess_finished(self._process, 3000):
@@ -166,9 +191,10 @@ class SingBoxManager(QObject):
             self.error.emit("failed to stop sing-box process in time")
             return False
 
-        # Wait for TUN adapter to be released by OS (active polling)
+        self._uses_tun = False
         self._starting = False
-        self._wait_tun_released()
+        if used_tun:
+            self._wait_tun_released()
         return True
 
     @staticmethod
@@ -229,6 +255,7 @@ class SingBoxManager(QObject):
         self._stop_requested = False
         was_running = self._running
         self._running = False
+        self._uses_tun = False
         if self._starting and not expected:
             self._report_startup_failure(self._unexpected_exit_message(exit_code, exit_status, startup=True))
         elif was_running and not expected and not self._runtime_error_reported:

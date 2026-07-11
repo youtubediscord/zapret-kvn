@@ -173,7 +173,7 @@ class ProxyProcessInfo:
     bytes_out: int = 0  # actual TCP bytes sent (upload)
 
 
-def get_proxy_connections(socks_port: int = 10808, http_port: int = 10809) -> list[ProxyProcessInfo]:
+def get_proxy_connections(socks_port: int = 1390, http_port: int = 1391) -> list[ProxyProcessInfo]:
     """Find processes connected to xray proxy ports with per-connection byte counts.
 
     Uses GetExtendedTcpTable for connection/PID discovery and

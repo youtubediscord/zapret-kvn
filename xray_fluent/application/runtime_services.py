@@ -118,7 +118,12 @@ def handle_unexpected_disconnect(controller: AppController) -> None:
             reset_auto_switch_cooldown=True,
         )
         stop_active_connection_processes(controller, disable_proxy=not controller._reconnecting)
-        controller._active_core = "xray"
+        controller._active_core = (
+            "singbox"
+            if not controller.state.settings.tun_mode
+            and str(controller.state.settings.proxy_engine) == "singbox"
+            else "xray"
+        )
         controller._clear_active_session()
         if not controller._reconnecting:
             controller._desired_connected = False
@@ -141,7 +146,6 @@ def on_core_state_changed(controller: AppController, _running: bool) -> None:
                 handle_unexpected_disconnect(controller)
     if (
         not is_connected
-        and controller._active_core == "xray"
         and controller.state.settings.enable_system_proxy
         and not controller._reconnecting
     ):

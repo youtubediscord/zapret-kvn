@@ -463,14 +463,29 @@ class MainWindow(FluentWindow):
 
     def _show_status(self, level: str, message: str) -> None:
         level = level.lower().strip()
+        long_duration = level.endswith("-long")
+        if long_duration:
+            level = level[:-5]
         if level == "error":
             InfoBar.error("Ошибка", message, position=InfoBarPosition.TOP_RIGHT, duration=6000, parent=self)
         elif level == "warning":
-            InfoBar.warning("Внимание", message, position=InfoBarPosition.TOP_RIGHT, duration=3000, parent=self)
+            InfoBar.warning(
+                "Внимание",
+                message,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=10000 if long_duration else 3000,
+                parent=self,
+            )
         elif level == "success":
             InfoBar.success("Успешно", message, position=InfoBarPosition.TOP_RIGHT, duration=2200, parent=self)
         else:
-            InfoBar.info("Инфо", message, position=InfoBarPosition.TOP_RIGHT, duration=2200, parent=self)
+            InfoBar.info(
+                "Инфо",
+                message,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=10000 if long_duration else 2200,
+                parent=self,
+            )
 
     def _import_nodes_from_clipboard(self) -> None:
         clipboard = QApplication.clipboard()

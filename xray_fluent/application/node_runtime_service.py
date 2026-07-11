@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ..country_flags import CountryResolver, detect_country
-from ..link_parser import repair_node_outbound_from_link, validate_node_outbound
+from ..link_parser import is_native_singbox_outbound, repair_node_outbound_from_link, validate_node_outbound
 
 if TYPE_CHECKING:
     from ..app_controller import AppController
@@ -55,7 +55,17 @@ def prepare_node_for_runtime(controller: AppController, node: Node | None) -> st
         return None
     if repair_node_outbound_from_link(node):
         controller.schedule_save()
-    return validate_node_outbound(node)
+    problem = validate_node_outbound(node)
+    if problem:
+        return problem
+    if is_native_singbox_outbound(node) and not controller.is_singbox_editor_mode():
+        protocol = str(node.outbound.get("type") or node.scheme or "native").upper()
+        return (
+            f"Протокол {protocol} использует native sing-box outbound и поддерживается только "
+            "ядром sing-box. Выберите Настройки → Движок прокси → sing-box extended "
+            "или TUN с ядром sing-box."
+        )
+    return None
 
 
 def get_fastest_alive_node(controller: AppController) -> Node | None:

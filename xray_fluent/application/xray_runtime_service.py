@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from ..constants import PROXY_HOST, XRAY_TUN_DEFAULT_INTERFACE_NAME
 from ..engines.xray import get_windows_default_route_context
 from .connection_service import find_free_api_port
+from .port_allocator import apply_proxy_port_auto_selection
 from .runtime_introspection import extract_xray_runtime_ports
 from .runtime_security import strip_xray_proxy_inbounds
 from .session_state import XrayRuntimeConfig
@@ -229,6 +230,17 @@ def build_runtime_xray_config(controller: AppController, node: Node | None = Non
         strip_xray_proxy_inbounds(payload)
 
     api_port, inbound_tags = controller._ensure_xray_metrics_contract(payload, allocate_port=True)
+    allowed_proxy_ports: set[int] = set()
+    active_session = getattr(controller, "_active_session", None)
+    if controller.xray.is_running and active_session is not None:
+        if active_session.socks_port > 0:
+            allowed_proxy_ports.add(int(active_session.socks_port))
+        if active_session.http_port > 0:
+            allowed_proxy_ports.add(int(active_session.http_port))
+    try:
+        port_selection = apply_proxy_port_auto_selection(payload, allowed_ports=allowed_proxy_ports)
+    except RuntimeError as exc:
+        raise ValueError("Не удалось подобрать свободные локальные SOCKS/HTTP порты для Xray.") from exc
 
     outbounds = payload.get("outbounds")
     has_proxy_outbound = False
@@ -276,12 +288,19 @@ def build_runtime_xray_config(controller: AppController, node: Node | None = Non
             loop_prevention_patched_outbounds = controller._apply_xray_tun_loop_prevention(payload, loop_prevention_interface)
 
     socks_port, http_port, _ = extract_xray_runtime_ports(payload)
+    requested_socks_port = socks_port
+    requested_http_port = http_port
+    if port_selection is not None:
+        requested_socks_port = port_selection.requested_socks_port
+        requested_http_port = port_selection.requested_http_port
     ping_host, ping_port = controller._infer_xray_ping_target(payload, node if used_selected_node else None)
     return XrayRuntimeConfig(
         config=payload,
         source_path=source_path,
         has_proxy_outbound=has_proxy_outbound,
         used_selected_node=used_selected_node,
+        requested_socks_port=requested_socks_port,
+        requested_http_port=requested_http_port,
         socks_port=socks_port,
         http_port=http_port,
         api_port=api_port,

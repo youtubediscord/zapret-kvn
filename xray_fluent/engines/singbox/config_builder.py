@@ -8,13 +8,19 @@ _SUPPORTED_NATIVE_PROTOCOLS = {"vless", "vmess", "trojan", "shadowsocks", "socks
 
 def build_singbox_outbound(node, *, tag: str = "proxy") -> dict[str, Any]:
     """Convert a stored node outbound into a native sing-box outbound."""
-    protocol = str((node.outbound or {}).get("protocol") or "").lower()
+    source = deepcopy(node.outbound or {})
+    protocol = str(source.get("protocol") or "").lower()
+    native_type = str(source.get("type") or "").lower()
+    if native_type and not protocol:
+        source["tag"] = tag
+        return source
+
     if protocol not in _SUPPORTED_NATIVE_PROTOCOLS:
         raise ValueError(
             f"Текущий сервер нельзя конвертировать в native sing-box outbound: protocol `{protocol or 'unknown'}`"
         )
 
-    outbound = _convert_outbound(deepcopy(node.outbound))
+    outbound = _convert_outbound(source)
     unsupported_transport = str(outbound.pop("_unsupported_transport", "") or "").strip()
     if unsupported_transport:
         raise ValueError(

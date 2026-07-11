@@ -15,7 +15,7 @@ The goal is not to mirror the entire upstream manual. The goal is to pin down:
 
 ## Source Baseline
 
-Prepared on `2026-03-27` against these sources:
+Prepared on `2026-03-27` and updated on `2026-07-11` against these sources:
 
 - local upstream source tree:
   `C:\Users\Admin\Downloads\sing-box-testing`
@@ -28,10 +28,15 @@ Prepared on `2026-03-27` against these sources:
 
 Important version note:
 
+- the bundled production core is `shtorm-7/sing-box-extended`
+  `v1.13.14-extended-2.5.0` Windows AMD64 purego (upstream sing-box
+  `1.13.14`); this variant keeps the Naive outbound and ships its matching
+  `libcronet.dll`;
 - the upstream docs above come from the `testing` branch, not from a frozen
   release tag;
 - those docs already mention fields added in `sing-box 1.14.0`;
-- the target baseline for the app is `sing-box 1.14.x`;
+- the historical editor research targets `sing-box 1.14.x`, while runtime
+  configs shipped by the app must validate against the bundled extended core;
 - the current app code relies on fields that exist in `1.10.0+` and `1.12.0+`,
   but future editor work may safely target the `1.14.x` field set;
 - if the bundled binary changes again later, re-check version-specific fields
@@ -39,12 +44,16 @@ Important version note:
 
 ## Current Project Reality
 
-- `sing-box` is currently used only for TUN mode.
-- The app has two runtime modes for `sing-box`:
-  - `native`: `sing-box` owns both TUN and the selected outbound.
-  - `hybrid`: `sing-box` owns TUN, but actual proxy traffic is relayed to a
-    local Xray SOCKS outbound because the selected node uses a transport that
-    our conversion layer does not map directly.
+- `sing-box extended` is the default engine for ordinary SOCKS/HTTP proxy mode
+  and remains the recommended TUN engine.
+- The same raw sing-box profile is compiled into one of two capture modes:
+  - proxy: app-owned SOCKS and HTTP inbounds replace source TUN/proxy inbounds;
+  - TUN: source TUN remains active with a fresh app-owned interface name.
+- Both capture modes support two outbound planner outcomes:
+  - `native`: `sing-box` owns the selected outbound;
+  - `hybrid`: `sing-box` remains the front runtime, while actual proxy traffic
+    is relayed to a local Xray sidecar for transports our conversion layer does
+    not map directly.
 - The current conversion layer supports these outbound families:
   - `vless`
   - `vmess`
@@ -52,6 +61,9 @@ Important version note:
   - `shadowsocks`
   - `socks`
   - `http`
+  - native sing-box `hysteria`, `hysteria2`, and `tuic` share links
+  - native sing-box outbound JSON (`{"type": ...}`), passed through without
+    conversion so extended-only outbound types are not rejected by the app
 - The current conversion layer supports these transport/TLS features:
   - `tls`
   - `reality`
@@ -81,6 +93,7 @@ Important version note:
 - Raw runtime JSON should not be treated as fully user-owned.
 - Some fields must stay app-managed:
   - generated TUN interface name;
+  - proxy-mode SOCKS/HTTP inbounds on `0.0.0.0` and their selected ports;
   - local protect port and password in hybrid mode;
   - Clash API listen address;
   - selected node materialization into the `proxy` outbound;

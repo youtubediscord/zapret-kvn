@@ -572,13 +572,18 @@ class DashboardPage(QWidget):
 
     def _refresh_routing_card(self) -> None:
         if not self._settings.tun_mode:
-            self.routing_mode_label.setText("Routing из raw xray config")
+            core = "sing-box" if self._is_singbox_proxy_mode() else "xray"
+            self.routing_mode_label.setText(f"Routing из raw {core} config")
             self.routing_dns_label.setText("DNS и routing берутся из editor JSON")
-            self.routing_rules_label.setText("Правила xray работают только для трафика, уже вошедшего в xray inbound")
+            self.routing_rules_label.setText(
+                f"Правила {core} работают для трафика, уже вошедшего в локальный SOCKS/HTTP inbound"
+            )
             if self._settings.enable_system_proxy:
                 self.routing_bypass_label.setText("Сейчас это обычно трафик приложений, которые используют системный прокси Windows")
             else:
-                self.routing_bypass_label.setText("Сист. прокси выключен: трафик попадёт в xray только из приложений с ручной proxy-настройкой")
+                self.routing_bypass_label.setText(
+                    f"Сист. прокси выключен: трафик попадёт в {core} только из приложений с ручной proxy-настройкой"
+                )
             return
         if self._is_xray_tun_mode():
             self.routing_mode_label.setText("Routing из raw xray config")
@@ -711,6 +716,9 @@ class DashboardPage(QWidget):
     def _is_tun2socks_mode(self) -> bool:
         return bool(self._settings.tun_mode and self._settings.tun_engine == "tun2socks")
 
+    def _is_singbox_proxy_mode(self) -> bool:
+        return bool(not self._settings.tun_mode and self._settings.proxy_engine == "singbox")
+
     def _route_engine_label(self) -> str:
         if self._settings.tun_mode:
             if self._settings.tun_engine == "singbox":
@@ -719,10 +727,15 @@ class DashboardPage(QWidget):
                 config_name = Path(self._settings.xray_config_file or "default.json").name
                 return f"VPN (TUN) -> xray (experimental) · raw xray config: {config_name}"
             return "VPN (TUN) -> tun2socks"
-        config_name = Path(self._settings.xray_config_file or "default.json").name
+        if self._is_singbox_proxy_mode():
+            config_name = Path(self._settings.singbox_config_file or "default.json").name
+            target = f"sing-box extended config: {config_name}"
+        else:
+            config_name = Path(self._settings.xray_config_file or "default.json").name
+            target = f"xray config: {config_name}"
         if self._settings.enable_system_proxy:
-            return f"Системный прокси Windows -> xray config: {config_name}"
-        return f"Локальный xray proxy  xray config: {config_name} (только вручную настроенные приложения)"
+            return f"Системный прокси Windows -> {target}"
+        return f"Локальный proxy -> {target} (только вручную настроенные приложения)"
 
     def _default_connection_message(self) -> str:
         action = "VPN" if self._settings.tun_mode else "Прокси"
@@ -752,9 +765,9 @@ class DashboardPage(QWidget):
 
     def _selected_node_summary(self) -> str:
         if self._selected_node is None:
-            if self._settings.tun_mode and self._settings.tun_engine == "singbox":
+            if (self._settings.tun_mode and self._settings.tun_engine == "singbox") or self._is_singbox_proxy_mode():
                 return self._singbox_editor_summary()
-            if not self._settings.tun_mode or self._is_xray_tun_mode():
+            if (not self._settings.tun_mode and self._settings.proxy_engine == "xray") or self._is_xray_tun_mode():
                 return self._xray_editor_summary()
             return "Активный профиль не выбран"
         group = self._selected_node.group or "По умолчанию"
@@ -767,13 +780,13 @@ class DashboardPage(QWidget):
         if self._connection_phase in {"starting", "error"}:
             return self._connection_message
         if self._selected_node is None:
-            if self._settings.tun_mode and self._settings.tun_engine == "singbox":
+            if (self._settings.tun_mode and self._settings.tun_engine == "singbox") or self._is_singbox_proxy_mode():
                 return (
                     f"Готов к запуску: {self._singbox_editor_summary()}"
                     if not self._connected
                     else f"Активный сеанс: {self._singbox_editor_summary()}"
                 )
-            if not self._settings.tun_mode or self._is_xray_tun_mode():
+            if (not self._settings.tun_mode and self._settings.proxy_engine == "xray") or self._is_xray_tun_mode():
                 return (
                     f"Готов к запуску: {self._xray_editor_summary()}"
                     if not self._connected
@@ -781,9 +794,10 @@ class DashboardPage(QWidget):
                 )
             return "Выберите узел, чтобы запустить прокси или VPN и просмотреть состояние сеанса."
         if not self._settings.tun_mode and not self._settings.enable_system_proxy:
+            core = "sing-box" if self._is_singbox_proxy_mode() else "xray"
             if self._connected:
-                return "Активен локальный xray proxy: только приложения с ручной proxy-настройкой попадут в xray"
-            return "Готов к запуску локального xray proxy: без системного прокси приложения должны быть настроены вручную"
+                return f"Активен локальный {core} proxy: только приложения с ручной proxy-настройкой попадут в {core}"
+            return f"Готов к запуску локального {core} proxy: без системного прокси приложения должны быть настроены вручную"
         if self._connected:
             return f"Активный сеанс: {self._selected_node_summary()}"
         return f"Готов к запуску: {self._selected_node_summary()}"

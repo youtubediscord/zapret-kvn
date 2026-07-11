@@ -38,6 +38,8 @@ class XrayRuntimeConfig:
     source_path: Path
     has_proxy_outbound: bool
     used_selected_node: bool
+    requested_socks_port: int
+    requested_http_port: int
     socks_port: int
     http_port: int
     api_port: int
@@ -47,6 +49,17 @@ class XrayRuntimeConfig:
     inbound_tags: tuple[str, ...]
     ping_host: str
     ping_port: int
+
+    @property
+    def proxy_ports_changed(self) -> bool:
+        return (
+            self.requested_socks_port > 0
+            and self.requested_http_port > 0
+            and (
+                self.socks_port != self.requested_socks_port
+                or self.http_port != self.requested_http_port
+            )
+        )
 
 
 def build_active_session_snapshot(

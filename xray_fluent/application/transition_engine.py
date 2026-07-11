@@ -74,7 +74,7 @@ def can_apply_proxy_runtime_change(
     proxy_enabled: bool,
     proxy_bypass_lan: bool,
 ) -> bool:
-    if session.active_core != "xray" or session.tun_mode or settings_tun_mode:
+    if session.active_core not in {"xray", "singbox"} or session.tun_mode or settings_tun_mode:
         return False
     if session.xray_layer_signature != current_xray_layer_signature:
         return False
@@ -89,7 +89,7 @@ def can_proxy_hot_swap(
     http_port: int,
     current_xray_layer_signature: str,
 ) -> bool:
-    if session.active_core != "xray" or session.tun_mode or settings_tun_mode:
+    if session.active_core not in {"xray", "singbox"} or session.tun_mode or settings_tun_mode:
         return False
     if session.socks_port != int(socks_port) or session.http_port != int(http_port):
         return False

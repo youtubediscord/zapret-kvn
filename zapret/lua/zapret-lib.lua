@@ -1,4 +1,4 @@
-NFQWS2_COMPAT_VER_REQUIRED=5
+NFQWS2_COMPAT_VER_REQUIRED=6
 
 if NFQWS2_COMPAT_VER~=NFQWS2_COMPAT_VER_REQUIRED then
 	error("Incompatible NFQWS2_COMPAT_VER. Use pktws and lua scripts from the same release !")
@@ -761,6 +761,63 @@ function fix_ip6_next(ip6, last_proto)
 	end
 end
 
+function dis_ipsrc(dis)
+	if dis.ip then
+		return dis.ip.ip_src
+	elseif dis.ip6 then
+		return dis.ip6.ip6_src
+	end
+end
+function dis_ipdst(dis)
+	if dis.ip then
+		return dis.ip.ip_dst
+	elseif dis.ip6 then
+		return dis.ip6.ip6_dst
+	end
+end
+
+function dis_l4_name(dis)
+	local l4
+	if dis.tcp then
+		l4="tcp"
+	elseif dis.udp then
+		l4="udp"
+	elseif dis.icmp then
+		l4="icmp"
+	else
+		l4="raw"..ip_proto_l3(dis)
+	end
+	return l4
+end
+function dis_l4_ports(dis)
+	local p1,p2
+	if dis.tcp then
+		p1=dis.tcp.th_sport
+		p2=dis.tcp.th_dport
+	elseif dis.udp then
+		p1=dis.udp.uh_sport
+		p2=dis.udp.uh_dport
+	elseif dis.icmp then
+		p1=dis.icmp.icmp_type
+		p2=dis.icmp.icmp_code
+	end
+	return p1 and (p1..":"..p2) or "?"
+end
+
+function dis_timer_name(dis)
+	return table.concat({ntop(dis_ipsrc(dis)),"->",ntop(dis_ipdst(dis)),"_",dis_l4_name(dis),"_",dis_l4_ports(dis)})
+end
+function desync_timer_name(desync)
+	local name = dis_timer_name(desync.dis)
+	if desync.track then
+		name = name.."_n"..desync.track.pos.direct.pcounter
+	else
+		name = name.."_"..brandom_az09(10)
+	end
+	return name
+end
+
+
 -- reverses ip addresses, ports and seq/ack
 function dis_reverse(dis)
 	if dis.ip then
@@ -1193,7 +1250,9 @@ function rawsend_dissect_segmented(desync, dis, mss, options)
 				len = #payload - pos + 1
 				if len > max_data then len = max_data end
 				if oob then
-					if urp>=pos and urp<(pos+len)then
+					if urp==0 and pos==1 then
+						discopy.tcp.th_flags = bitor(discopy.tcp.th_flags, TH_URG)
+					elseif urp>=pos and urp<(pos+len) then
 						discopy.tcp.th_flags = bitor(discopy.tcp.th_flags, TH_URG)
 						discopy.tcp.th_urp = urp-pos+1
 					else
@@ -1376,9 +1435,9 @@ end
 function append_path(path,file)
 	return string.sub(path,#path,#path)=='/' and path..file or path.."/"..file
 end
-function writeable_file_name(filename)
+function writable_file_name(filename)
 	if is_absolute_path(filename) then return filename end
-	local writedir = os.getenv("WRITEABLE")
+	local writedir = os.getenv("WRITABLE")
 	if not writedir then return filename end
 	return append_path(writedir, filename)
 end
@@ -1689,6 +1748,7 @@ function writefile(filename, data)
 		error("writefile: "..err)
 	end
 end
+
 
 -- DISSECTORS
 

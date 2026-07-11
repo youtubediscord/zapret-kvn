@@ -15,8 +15,8 @@ function pcap_write(file, raw)
 	pcap_write_packet(file, raw)
 end
 
--- test case : --writeable=zdir --in-range=a --lua-desync=pcap:file=test.pcap
--- arg : file=<filename> - file for storing pcap data. if --writeable is specified and filename is relative - append filename to writeable path
+-- test case : --writable=zdir --in-range=a --lua-desync=pcap:file=test.pcap
+-- arg : file=<filename> - file for storing pcap data. if --writable is specified and filename is relative - append filename to writable path
 -- arg : keep - do not overwrite file, append packets to existing
 function pcap(ctx, desync)
 	if not desync.arg.file or #desync.arg.file==0 then
@@ -24,7 +24,7 @@ function pcap(ctx, desync)
 	end
 	local fn_cache_name = desync.func_instance.."_fn"
 	if not _G[fn_cache_name] then
-		_G[fn_cache_name] = writeable_file_name(desync.arg.file)
+		_G[fn_cache_name] = writable_file_name(desync.arg.file)
 		if not desync.arg.keep then
 			-- overwrite file
 			os.remove(_G[fn_cache_name])

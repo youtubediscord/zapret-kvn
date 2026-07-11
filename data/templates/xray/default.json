@@ -6,7 +6,7 @@
     {
       "tag": "socks-in",
       "listen": "0.0.0.0",
-      "port": 10808,
+      "port": 1390,
       "protocol": "socks",
       "settings": {
         "auth": "noauth",
@@ -25,7 +25,7 @@
     {
       "tag": "http-in",
       "listen": "0.0.0.0",
-      "port": 10809,
+      "port": 1391,
       "protocol": "http",
       "settings": {},
       "sniffing": {

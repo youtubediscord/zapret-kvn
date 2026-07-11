@@ -10,8 +10,8 @@ builds today.
 The user-facing product model is now:
 
 - one raw `sing-box.json` editor;
-- that raw config is the source of truth for TUN, routing, DNS, and the main
-  sing-box-side graph;
+- that raw config is the source of truth for routing, DNS, and the main
+  sing-box-side graph in both proxy and TUN modes;
 - runtime planning patches only app-owned service fragments;
 - if outbound tag `proxy` exists, the selected node may replace only that
   outbound;
@@ -19,6 +19,11 @@ The user-facing product model is now:
   (for example Xray `xhttp`), the app keeps the same raw `sing-box.json` as
   the front config and automatically adds an Xray sidecar only for the proxy
   path.
+
+For ordinary proxy mode the compiler removes source TUN/SOCKS/HTTP inbounds and
+adds app-owned SOCKS `0.0.0.0:1390` and HTTP `0.0.0.0:1391` inbounds. Occupied
+ports are moved together to the next free pair. For TUN mode it removes source
+proxy inbounds and assigns a fresh TUN interface name.
 
 This means the older `RoutingSettings`-driven full builder described below is
 legacy architecture context, not the preferred runtime path for the current raw
@@ -72,12 +77,33 @@ Zapret KVN currently emits only this subset:
 Everything else is currently out of scope for app-generated `sing-box` runtime
 configs.
 
-## Two Runtime Modes
+## Two Outbound Planner Outcomes
 
 ### Native mode
 
 Used when the selected node can be converted directly from Xray-style outbound
-JSON into a `sing-box` outbound.
+JSON into a `sing-box` outbound, or was imported as native sing-box JSON.
+
+In ordinary proxy mode the `inbounds` section is compiled to:
+
+```json
+[
+  {
+    "type": "socks",
+    "tag": "socks-in",
+    "listen": "0.0.0.0",
+    "listen_port": 1390
+  },
+  {
+    "type": "http",
+    "tag": "http-in",
+    "listen": "0.0.0.0",
+    "listen_port": 1391
+  }
+]
+```
+
+In TUN mode the runtime shape is:
 
 Runtime shape:
 
@@ -150,8 +176,8 @@ Used when the selected node cannot be mapped directly by our current conversion
 layer and the app must insert Xray as a sidecar. Today this happens when the
 node uses Xray `xhttp`.
 
-In hybrid mode, the `sing-box` config still owns TUN, but `proxy` is no longer
-the remote server. Instead:
+In hybrid mode, `sing-box` still owns the front proxy or TUN runtime, but
+`proxy` is no longer the remote server. Instead:
 
 - `sing-box` sends proxied traffic to local Xray over SOCKS;
 - `sing-box` exposes a local Shadowsocks protect inbound;
@@ -379,6 +405,17 @@ this subset:
 - `shadowsocks`
 - `socks`
 - `http`
+
+The parser also stores `hysteria://`, `hy2://` / `hysteria2://`, and
+`tuic://` nodes as native sing-box outbounds. A native outbound JSON object
+with a top-level `type` field is passed through as-is, with only its runtime
+`tag` replaced by the app. These native nodes intentionally require the
+`TUN -> sing-box` engine and are not sent to Xray.
+
+Hysteria2 links containing `pinSHA256` are rejected with an explicit error:
+the URI field pins the complete certificate, while sing-box exposes
+`certificate_public_key_sha256` (an SPKI/public-key pin). Silently copying or
+dropping that value would weaken or break certificate verification.
 
 ### TLS support mapped today
 

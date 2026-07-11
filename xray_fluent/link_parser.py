@@ -13,7 +13,17 @@ class LinkParseError(ValueError):
 
 
 def parse_links_text(text: str) -> tuple[list[Node], list[str]]:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    stripped = text.strip()
+    lines: list[str]
+    if stripped.startswith("{"):
+        try:
+            json.loads(stripped)
+        except json.JSONDecodeError:
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+        else:
+            lines = [stripped]
+    else:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
     nodes: list[Node] = []
     errors: list[str] = []
 
@@ -44,6 +54,12 @@ def parse_single(raw: str) -> Node:
         return _parse_trojan(text)
     if scheme == "ss":
         return _parse_shadowsocks(text)
+    if scheme == "hysteria":
+        return _parse_hysteria(text)
+    if scheme in {"hy2", "hysteria2"}:
+        return _parse_hysteria2(text)
+    if scheme == "tuic":
+        return _parse_tuic(text)
     if scheme in {"socks", "socks5"}:
         return _parse_socks(text)
     if scheme in {"http", "https"}:
@@ -100,6 +116,128 @@ def _clean_name(name: str, fallback: str) -> str:
 
 def _to_bool(value: str) -> bool:
     return str(value).lower() in {"1", "true", "yes", "on"}
+
+
+def _url_auth(parsed) -> str:
+    username = unquote(parsed.username or "")
+    if parsed.password is None:
+        return username
+    return f"{username}:{unquote(parsed.password)}"
+
+
+def _url_port_spec(parsed) -> str:
+    host_port = parsed.netloc.rsplit("@", 1)[-1]
+    if host_port.startswith("["):
+        closing = host_port.find("]")
+        if closing < 0:
+            return ""
+        suffix = host_port[closing + 1 :]
+        return suffix[1:] if suffix.startswith(":") else ""
+    if ":" not in host_port:
+        return ""
+    return host_port.rsplit(":", 1)[1]
+
+
+def _normalize_server_ports(value: str, *, default_port: int, allow_hopping: bool) -> tuple[int, list[str]]:
+    raw = str(value or "").strip()
+    if not raw:
+        return default_port, []
+
+    parts = [item.strip() for item in raw.replace("/", ",").split(",") if item.strip()]
+    if not parts:
+        return default_port, []
+    if not allow_hopping and len(parts) != 1:
+        raise LinkParseError("port hopping is not supported for this protocol")
+
+    normalized: list[str] = []
+    first_port = 0
+    has_range = False
+    for item in parts:
+        separator = "-" if "-" in item else ":" if ":" in item else ""
+        if separator:
+            if not allow_hopping:
+                raise LinkParseError("port hopping is not supported for this protocol")
+            start_text, end_text = item.split(separator, 1)
+            try:
+                start = int(start_text)
+                end = int(end_text)
+            except ValueError as exc:
+                raise LinkParseError(f"invalid port range: {item}") from exc
+            if not (1 <= start <= end <= 65535):
+                raise LinkParseError(f"invalid port range: {item}")
+            normalized.append(f"{start}:{end}")
+            first_port = first_port or start
+            has_range = True
+            continue
+
+        try:
+            port = int(item)
+        except ValueError as exc:
+            raise LinkParseError(f"invalid port: {item}") from exc
+        if not 1 <= port <= 65535:
+            raise LinkParseError(f"invalid port: {item}")
+        normalized.append(str(port))
+        first_port = first_port or port
+
+    if len(normalized) == 1 and not has_range:
+        return first_port, []
+    return first_port, normalized
+
+
+def _link_server(parsed, *, default_port: int = 443, allow_hopping: bool = False) -> tuple[str, int, list[str]]:
+    server = parsed.hostname or ""
+    if not server:
+        raise LinkParseError("missing server address")
+    port, server_ports = _normalize_server_ports(
+        _url_port_spec(parsed),
+        default_port=default_port,
+        allow_hopping=allow_hopping,
+    )
+    return server, port, server_ports
+
+
+def _apply_server_ports(outbound: dict[str, Any], port: int, server_ports: list[str]) -> None:
+    if server_ports:
+        outbound["server_ports"] = server_ports
+    else:
+        outbound["server_port"] = port
+
+
+def _parse_mbps(value: str, field: str) -> int:
+    normalized = str(value or "").strip().lower().replace("mbps", "").strip()
+    try:
+        result = int(float(normalized))
+    except (ValueError, OverflowError) as exc:
+        raise LinkParseError(f"invalid {field}: {value}") from exc
+    if result < 0:
+        raise LinkParseError(f"invalid {field}: {value}")
+    return result
+
+
+def _set_hysteria_bandwidth(outbound: dict[str, Any], params: dict[str, str], field: str) -> None:
+    mbps = _get_param(params, f"{field}_mbps", f"{field}mbps")
+    if mbps:
+        outbound[f"{field}_mbps"] = _parse_mbps(mbps, f"{field}_mbps")
+        return
+    value = _get_param(params, field)
+    if not value:
+        return
+    if value.strip().isdigit():
+        outbound[f"{field}_mbps"] = int(value)
+    else:
+        outbound[field] = value
+
+
+def _native_node(link: str, scheme: str, outbound: dict[str, Any], server: str, port: int) -> Node:
+    name = _clean_name(urlsplit(link).fragment, f"{scheme}-{server}:{port}")
+    return Node(
+        name=name,
+        scheme=scheme,
+        server=server,
+        port=port,
+        link=link,
+        outbound=outbound,
+    )
 
 
 def _build_stream_settings(params: dict[str, str], default_network: str = "tcp", default_security: str = "none") -> dict[str, Any]:
@@ -257,6 +395,27 @@ def repair_node_outbound_from_link(node: Node) -> bool:
 
 def validate_node_outbound(node: Node) -> str | None:
     outbound = node.outbound if isinstance(node.outbound, dict) else {}
+    native_type = str(outbound.get("type") or "").strip().lower()
+    protocol = str(outbound.get("protocol") or "").strip().lower()
+    if native_type and not protocol:
+        if native_type in {"hysteria", "hysteria2", "tuic"}:
+            server = str(outbound.get("server") or "").strip()
+            has_port = bool(outbound.get("server_port") or outbound.get("server_ports"))
+            if not server or not has_port:
+                return f"Сервер {node.name or native_type} не содержит адрес или порт для {native_type}."
+        if native_type == "hysteria":
+            if not (outbound.get("auth") or str(outbound.get("auth_str") or "")):
+                return f"Сервер {node.name or native_type} не содержит auth для Hysteria."
+            if not (outbound.get("up") or outbound.get("up_mbps")):
+                return f"Сервер {node.name or native_type} не содержит upload bandwidth для Hysteria."
+            if not (outbound.get("down") or outbound.get("down_mbps")):
+                return f"Сервер {node.name or native_type} не содержит download bandwidth для Hysteria."
+        elif native_type == "hysteria2" and not str(outbound.get("password") or ""):
+            return f"Сервер {node.name or native_type} не содержит password для Hysteria2."
+        elif native_type == "tuic" and not str(outbound.get("uuid") or ""):
+            return f"Сервер {node.name or native_type} не содержит UUID для TUIC."
+        return None
+
     stream_settings = outbound.get("streamSettings") if isinstance(outbound, dict) else None
     if not isinstance(stream_settings, dict):
         return None
@@ -278,6 +437,11 @@ def validate_node_outbound(node: Node) -> str | None:
         f"Сервер {node_name} не может быть запущен: для REALITY обязателен publicKey "
         "(параметр pbk в VLESS-ссылке), но в этой ссылке он пустой или отсутствует."
     )
+
+
+def is_native_singbox_outbound(node: Node) -> bool:
+    outbound = node.outbound if isinstance(node.outbound, dict) else {}
+    return bool(outbound.get("type")) and not bool(outbound.get("protocol"))
 
 
 def _parse_vmess(link: str) -> Node:
@@ -429,6 +593,184 @@ def _parse_shadowsocks(link: str) -> Node:
     )
 
 
+def _parse_hysteria(link: str) -> Node:
+    parsed = urlsplit(link)
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    params = {key: _first(query, key) for key in query}
+    server, port, server_ports = _link_server(parsed, allow_hopping=True)
+
+    port_override = _get_param(params, "mport", "ports")
+    if port_override:
+        port, server_ports = _normalize_server_ports(
+            port_override,
+            default_port=port,
+            allow_hopping=True,
+        )
+
+    outbound: dict[str, Any] = {
+        "type": "hysteria",
+        "server": server,
+    }
+    _apply_server_ports(outbound, port, server_ports)
+
+    auth = _get_param(params, "auth", "auth_str") or _url_auth(parsed)
+    if auth:
+        outbound["auth_str"] = auth
+    _set_hysteria_bandwidth(outbound, params, "up")
+    _set_hysteria_bandwidth(outbound, params, "down")
+
+    obfs = _get_param(params, "obfs", "obfsParam", "obfs_param")
+    if obfs:
+        outbound["obfs"] = obfs
+
+    tls: dict[str, Any] = {
+        "enabled": True,
+        "server_name": _get_param(params, "peer", "sni") or server,
+    }
+    alpn = _get_param(params, "alpn")
+    if alpn:
+        tls["alpn"] = [item.strip() for item in alpn.split(",") if item.strip()]
+    certificate_path = _get_param(params, "ca")
+    if certificate_path:
+        tls["certificate_path"] = certificate_path
+    certificate = _get_param(params, "ca_str")
+    if certificate:
+        tls["certificate"] = certificate.splitlines()
+    if _to_bool(_get_param(params, "insecure", "skip-cert-verify", "allow_insecure")):
+        tls["insecure"] = True
+    outbound["tls"] = tls
+
+    if _to_bool(_get_param(params, "tfo", "tcp-fast-open", "tcp_fast_open")):
+        outbound["tcp_fast_open"] = True
+    hop_interval = _get_param(params, "hop_interval", "hopInterval")
+    if hop_interval and server_ports:
+        outbound["hop_interval"] = hop_interval
+
+    return _native_node(link, "hysteria", outbound, server, port)
+
+
+def _parse_hysteria2(link: str) -> Node:
+    parsed = urlsplit(link)
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    params = {key: _first(query, key) for key in query}
+    server, port, server_ports = _link_server(parsed, allow_hopping=True)
+
+    password = _url_auth(parsed)
+    if not password:
+        raise LinkParseError("invalid hysteria2 link: missing authentication password")
+
+    port_override = _get_param(params, "mport", "ports")
+    if port_override:
+        port, server_ports = _normalize_server_ports(
+            port_override,
+            default_port=port,
+            allow_hopping=True,
+        )
+
+    certificate_pin = _get_param(params, "pinSHA256", "pin_sha256")
+    if certificate_pin:
+        raise LinkParseError(
+            "Hysteria2 pinSHA256 pins the whole certificate and cannot be safely converted "
+            "to sing-box certificate_public_key_sha256"
+        )
+
+    outbound: dict[str, Any] = {
+        "type": "hysteria2",
+        "server": server,
+        "password": password,
+    }
+    _apply_server_ports(outbound, port, server_ports)
+
+    up = _get_param(params, "up", "up_mbps", "upmbps")
+    down = _get_param(params, "down", "down_mbps", "downmbps")
+    if up:
+        outbound["up_mbps"] = _parse_mbps(up, "up_mbps")
+    if down:
+        outbound["down_mbps"] = _parse_mbps(down, "down_mbps")
+
+    obfs_type = _get_param(params, "obfs").lower()
+    if obfs_type and obfs_type not in {"none", "plain", "salamander"}:
+        raise LinkParseError(f"unsupported Hysteria2 obfs type for sing-box: {obfs_type}")
+    if obfs_type == "salamander":
+        obfs_password = _get_param(params, "obfs-password", "obfs_password")
+        if not obfs_password:
+            raise LinkParseError("invalid hysteria2 link: salamander obfs requires obfs-password")
+        outbound["obfs"] = {
+            "type": "salamander",
+            "password": obfs_password,
+        }
+
+    tls: dict[str, Any] = {
+        "enabled": True,
+        "server_name": _get_param(params, "sni", "peer") or server,
+    }
+    if _to_bool(_get_param(params, "insecure", "skip-cert-verify", "allow_insecure")):
+        tls["insecure"] = True
+    outbound["tls"] = tls
+
+    hop_interval = _get_param(params, "hop_interval", "hopInterval")
+    if hop_interval and server_ports:
+        outbound["hop_interval"] = hop_interval
+
+    return _native_node(link, "hysteria2", outbound, server, port)
+
+
+def _parse_tuic(link: str) -> Node:
+    parsed = urlsplit(link)
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    params = {key: _first(query, key) for key in query}
+    server, port, _ = _link_server(parsed)
+
+    uuid = unquote(parsed.username or "")
+    if not uuid:
+        raise LinkParseError("invalid tuic link: missing uuid")
+    password = unquote(parsed.password or "")
+
+    outbound: dict[str, Any] = {
+        "type": "tuic",
+        "server": server,
+        "server_port": port,
+        "uuid": uuid,
+    }
+    if password:
+        outbound["password"] = password
+
+    congestion_control = _get_param(params, "congestion_control", "congestion-controller", "congestionControl")
+    if congestion_control and congestion_control != "cubic":
+        outbound["congestion_control"] = congestion_control
+
+    udp_over_stream = _to_bool(_get_param(params, "udp_over_stream", "udp-over-stream"))
+    if udp_over_stream:
+        outbound["udp_over_stream"] = True
+    else:
+        udp_relay_mode = _get_param(params, "udp_relay_mode", "udp-relay-mode")
+        if udp_relay_mode:
+            outbound["udp_relay_mode"] = udp_relay_mode
+
+    if _to_bool(_get_param(params, "zero_rtt_handshake", "reduce_rtt", "zero-rtt-handshake")):
+        outbound["zero_rtt_handshake"] = True
+    heartbeat = _get_param(params, "heartbeat_interval", "heartbeat")
+    if heartbeat:
+        outbound["heartbeat"] = heartbeat
+    if _to_bool(_get_param(params, "tfo", "tcp-fast-open", "tcp_fast_open")):
+        outbound["tcp_fast_open"] = True
+
+    tls: dict[str, Any] = {
+        "enabled": True,
+        "server_name": _get_param(params, "sni") or server,
+    }
+    if _to_bool(_get_param(params, "insecure", "skip-cert-verify", "allow_insecure")):
+        tls["insecure"] = True
+    if _to_bool(_get_param(params, "disable_sni")):
+        tls["disable_sni"] = True
+    alpn = _get_param(params, "alpn")
+    if alpn:
+        tls["alpn"] = [item.strip() for item in alpn.split(",") if item.strip()]
+    outbound["tls"] = tls
+
+    return _native_node(link, "tuic", outbound, server, port)
+
+
 def _parse_socks(link: str) -> Node:
     parsed = urlsplit(link)
     server = parsed.hostname or ""
@@ -501,25 +843,48 @@ def _parse_json_outbound(text: str) -> Node:
     outbound: dict[str, Any]
     if "protocol" in payload:
         outbound = dict(payload)
+    elif "type" in payload:
+        outbound = dict(payload)
     elif isinstance(payload.get("outbounds"), list) and payload["outbounds"]:
-        outbound = dict(payload["outbounds"][0])
+        candidates = [item for item in payload["outbounds"] if isinstance(item, dict)]
+        if not candidates:
+            raise LinkParseError("JSON `outbounds` must contain an object")
+        selected = next((item for item in candidates if item.get("tag") == "proxy"), candidates[0])
+        outbound = dict(selected)
     else:
-        raise LinkParseError("JSON must contain `protocol` or `outbounds`")
+        raise LinkParseError("JSON must contain `protocol`, `type`, or `outbounds`")
 
-    protocol = str(outbound.get("protocol") or "custom")
+    protocol = str(outbound.get("protocol") or outbound.get("type") or "custom")
     tag = str(outbound.get("tag") or protocol)
     server = ""
     port = 0
 
-    settings = outbound.get("settings") or {}
-    if protocol in {"vless", "vmess"}:
-        vnext = (settings.get("vnext") or [{}])[0]
-        server = str(vnext.get("address") or "")
-        port = int(vnext.get("port") or 0)
-    elif protocol in {"trojan", "shadowsocks", "socks", "http"}:
-        servers = (settings.get("servers") or [{}])[0]
-        server = str(servers.get("address") or "")
-        port = int(servers.get("port") or 0)
+    if outbound.get("type") and not outbound.get("protocol"):
+        server = str(outbound.get("server") or "")
+        try:
+            port = int(outbound.get("server_port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        if port <= 0:
+            server_ports = outbound.get("server_ports") or []
+            if not isinstance(server_ports, list):
+                server_ports = [server_ports]
+            if server_ports:
+                first_port = str(server_ports[0]).split(":", 1)[0]
+                try:
+                    port = int(first_port)
+                except ValueError:
+                    port = 0
+    else:
+        settings = outbound.get("settings") or {}
+        if protocol in {"vless", "vmess"}:
+            vnext = (settings.get("vnext") or [{}])[0]
+            server = str(vnext.get("address") or "")
+            port = int(vnext.get("port") or 0)
+        elif protocol in {"trojan", "shadowsocks", "socks", "http"}:
+            servers = (settings.get("servers") or [{}])[0]
+            server = str(servers.get("address") or "")
+            port = int(servers.get("port") or 0)
 
     return Node(
         name=f"json-{tag}",
