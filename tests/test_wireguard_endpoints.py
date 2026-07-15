@@ -17,7 +17,9 @@ from xray_fluent.engines.singbox.config_builder import (
     is_singbox_endpoint_outbound,
 )
 from xray_fluent.engines.singbox.runtime_planner import (
+    EndpointProxyDnsPolicy,
     classify_node_for_singbox,
+    endpoint_proxy_dns_policy,
     inspect_singbox_document_text,
     parse_singbox_document,
     plan_singbox_proxy_runtime,
@@ -87,12 +89,12 @@ AllowedIPs = 0.0.0.0/0
 
 FIXTURE_WG_CONF_PUBLIC_DNS = """[Interface]
 PrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=
-Address = 10.8.0.78/32
-DNS = 1.1.1.1, 1.0.0.1
+Address = 10.88.0.2/32
+DNS = 9.9.9.9, 8.8.4.4, 1.1.1.1
 
 [Peer]
 PublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=
-Endpoint = 144.31.213.169:44309
+Endpoint = 198.51.100.7:51830
 AllowedIPs = 0.0.0.0/0
 """
 
@@ -560,7 +562,7 @@ class WireguardDedupTests(unittest.TestCase):
 
 
 class WireguardDnsOverrideTests(unittest.TestCase):
-    """FAC1..FAC4, FAC6 — фикс P1: DNS через WG/AWG туннель (problems.md)."""
+    """DNS-контракт обычного WireGuard и AmneziaWG."""
 
     def _document(self):
         return parse_singbox_document(
@@ -577,29 +579,67 @@ class WireguardDnsOverrideTests(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         return entries[0]
 
-    def test_select_endpoint_proxy_dns_pure_function(self) -> None:
-        # 1) первый приватный (RFC1918/ULA) адрес из DNS=.
-        self.assertEqual(select_endpoint_proxy_dns(["10.64.0.1"], ["10.66.66.2/32"]), "10.64.0.1")
+    def test_endpoint_proxy_dns_policy_uses_amnezia_capability(self) -> None:
         self.assertEqual(
-            select_endpoint_proxy_dns(["1.1.1.1", "10.64.0.1"], ["10.8.0.78/32"]),
+            endpoint_proxy_dns_policy(_parse_wg_node().outbound),
+            EndpointProxyDnsPolicy.CONFIGURED,
+        )
+        self.assertEqual(
+            endpoint_proxy_dns_policy(_parse_awg_node().outbound),
+            EndpointProxyDnsPolicy.AMNEZIA_GATEWAY,
+        )
+
+    def test_native_wireguard_dns_selection_has_no_gateway_heuristic(self) -> None:
+        policy = EndpointProxyDnsPolicy.CONFIGURED
+        self.assertEqual(
+            select_endpoint_proxy_dns(
+                ["9.9.9.9", "8.8.4.4", "1.1.1.1"],
+                ["10.88.0.2/32"],
+                policy=policy,
+            ),
+            "9.9.9.9",
+        )
+        self.assertEqual(
+            select_endpoint_proxy_dns(
+                ["1.1.1.1", "10.64.0.1"],
+                ["10.8.0.78/32"],
+                policy=policy,
+            ),
+            "1.1.1.1",
+        )
+        self.assertIsNone(
+            select_endpoint_proxy_dns(None, ["10.8.0.78/32"], policy=policy)
+        )
+
+    def test_amnezia_dns_selection_can_use_tunnel_gateway(self) -> None:
+        policy = EndpointProxyDnsPolicy.AMNEZIA_GATEWAY
+        # Явно заданный приватный резолвер важнее вычисленного шлюза.
+        self.assertEqual(
+            select_endpoint_proxy_dns(
+                ["1.1.1.1", "10.64.0.1"],
+                ["10.8.0.78/32"],
+                policy=policy,
+            ),
             "10.64.0.1",
         )
-        self.assertEqual(select_endpoint_proxy_dns(["fd00::1"], []), "fd00::1")
-        # 2) шлюз из первого IPv4 CIDR; /32 считается /24, берётся первый хост.
-        self.assertEqual(select_endpoint_proxy_dns(None, ["10.8.0.78/32"]), "10.8.0.1")
+        # /32 считается адресом внутри /24, шлюзом выбирается первый хост.
         self.assertEqual(
-            select_endpoint_proxy_dns(["1.1.1.1", "1.0.0.1"], ["10.8.0.78/32"]),
+            select_endpoint_proxy_dns(None, ["10.8.0.78/32"], policy=policy),
             "10.8.0.1",
         )
         self.assertEqual(
-            select_endpoint_proxy_dns([], ["fd42:42:42::2/128", "10.66.66.2/24"]),
+            select_endpoint_proxy_dns(
+                [],
+                ["fd42:42:42::2/128", "10.66.66.2/24"],
+                policy=policy,
+            ),
             "10.66.66.1",
         )
-        # 3) первый DNS как есть (нет пригодного IPv4 CIDR).
-        self.assertEqual(select_endpoint_proxy_dns(["1.1.1.1"], ["fd42::2/128"]), "1.1.1.1")
-        # 4) ничего не выбрано — шаблон не трогаем.
-        self.assertIsNone(select_endpoint_proxy_dns(None, None))
-        self.assertIsNone(select_endpoint_proxy_dns([], ["fd42::2/128"]))
+        self.assertEqual(
+            select_endpoint_proxy_dns(["1.1.1.1"], ["fd42::2/128"], policy=policy),
+            "1.1.1.1",
+        )
+        self.assertIsNone(select_endpoint_proxy_dns(None, None, policy=policy))
 
     def test_fac1_private_conf_dns_overrides_proxy_dns(self) -> None:
         nodes, errors = parse_links_text(FIXTURE_WG_CONF_PRIVATE_DNS)
@@ -618,17 +658,32 @@ class WireguardDnsOverrideTests(unittest.TestCase):
         self.assertNotIn("_dns", proxies[0])
         self.assertFalse(any(str(key).startswith("_") for key in proxies[0]))
 
-    def test_fac2_gateway_derived_from_interface_address(self) -> None:
+    def test_fac2_native_wireguard_uses_first_configured_dns(self) -> None:
         nodes, errors = parse_links_text(FIXTURE_WG_CONF_PUBLIC_DNS)
         self.assertEqual(errors, [])
         node = nodes[0]
-        self.assertEqual(node.outbound["_dns"], ["1.1.1.1", "1.0.0.1"])
+        self.assertEqual(node.outbound["_dns"], ["9.9.9.9", "8.8.4.4", "1.1.1.1"])
 
         plan = plan_singbox_runtime(self._document(), node)
         self.assertEqual(
             self._proxy_dns_entry(plan),
-            {"tag": "proxy-dns", "type": "udp", "server": "10.8.0.1", "detour": "proxy"},
+            {"tag": "proxy-dns", "type": "udp", "server": "9.9.9.9", "detour": "proxy"},
         )
+
+    def test_awg_without_private_dns_uses_tunnel_gateway(self) -> None:
+        plan = plan_singbox_runtime(self._document(), _parse_awg_node())
+        self.assertEqual(
+            self._proxy_dns_entry(plan),
+            {"tag": "proxy-dns", "type": "udp", "server": "10.8.1.1", "detour": "proxy"},
+        )
+
+    def test_native_wireguard_without_dns_keeps_template_dns(self) -> None:
+        nodes, errors = parse_links_text(FIXTURE_WG_ENDPOINT_JSON)
+        self.assertEqual(errors, [])
+        self.assertEqual(nodes[0].scheme, "wireguard")
+
+        plan = plan_singbox_runtime(self._document(), nodes[0])
+        self.assertEqual(plan.singbox_config["dns"], self._template_dns())
 
     def test_fac3_no_dns_and_no_address_keeps_template_dns(self) -> None:
         nodes, errors = parse_links_text(FIXTURE_WG_CONF_NO_DNS_NO_ADDRESS)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+from enum import Enum
 import hashlib
 import ipaddress
 from ipaddress import ip_address
@@ -30,6 +31,13 @@ _APP_SINGBOX_HYBRID_PROTECT_INBOUND_TAG = "__app_hybrid_protect_in"
 _APP_XRAY_SIDECAR_RELAY_INBOUND_TAG = "__app_hybrid_relay_in"
 _APP_XRAY_SIDECAR_PROTECT_OUTBOUND_TAG = "__app_hybrid_protect_out"
 _PUBLIC_PROXY_LISTEN = "0.0.0.0"
+
+
+class EndpointProxyDnsPolicy(str, Enum):
+    """Политика DNS для нативного endpoint WireGuard в sing-box."""
+
+    CONFIGURED = "configured"
+    AMNEZIA_GATEWAY = "amnezia_gateway"
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,13 +253,14 @@ def _plan_runtime_outbound(
         del outbounds[proxy_index]
         _replace_or_append_tagged(_ensure_list(runtime_config, "endpoints"), "proxy", proxy_endpoint)
         _ensure_proxy_server_bootstrap_contract(runtime_config, proxy_endpoint, node.server)
-        # Amnezia-серверы перехватывают порт 53 внутри туннеля: шаблонный
-        # proxy-dns (tcp 8.8.8.8) получает REFUSED. Переключаемся на резолвер
-        # туннеля (DNS= из .conf либо шлюз подсети интерфейса).
+        # Обычный WireGuard обязан уважать первый DNS из .conf. Только AWG
+        # разрешено подменять публичный DNS шлюзом туннеля: Amnezia-серверы
+        # могут перехватывать порт 53 и отвечать именно с адреса шлюза.
         node_outbound = node.outbound if isinstance(node.outbound, dict) else {}
         dns_override = select_endpoint_proxy_dns(
             node_outbound.get("_dns"),
             proxy_endpoint.get("address"),
+            policy=endpoint_proxy_dns_policy(node_outbound),
         )
         if dns_override:
             _override_proxy_dns_server(runtime_config, dns_override)
@@ -638,20 +647,38 @@ def _ensure_singbox_proxy_runtime_contract(
     return selection
 
 
+def endpoint_proxy_dns_policy(endpoint: dict[str, Any]) -> EndpointProxyDnsPolicy:
+    """Определить DNS-политику по возможностям endpoint, а не имени схемы.
+
+    JSON-импорт может представить AWG как endpoint типа ``wireguard``. Поэтому
+    надёжный признак AmneziaWG — непустой объект ``amnezia`` в самом outbound.
+    """
+    amnezia = endpoint.get("amnezia")
+    if isinstance(amnezia, dict) and amnezia:
+        return EndpointProxyDnsPolicy.AMNEZIA_GATEWAY
+    return EndpointProxyDnsPolicy.CONFIGURED
+
+
 def select_endpoint_proxy_dns(
     dns_values: list[str] | None,
     endpoint_addresses: list[str] | None,
+    *,
+    policy: EndpointProxyDnsPolicy,
 ) -> str | None:
-    """Выбор DNS-сервера туннеля для endpoint-нод (WG/AWG).
+    """Выбрать DNS endpoint-туннеля согласно явной политике протокола.
 
-    Порядок (см. problems.md P1):
-    1. первый ПРИВАТНЫЙ (RFC1918/ULA) адрес из `DNS =` conf'а;
-    2. иначе шлюз из первого IPv4 CIDR адреса интерфейса (/32 считается /24,
-       берётся первый хост сети: 10.8.0.78/32 -> 10.8.0.1);
-    3. иначе первый адрес из `DNS =` как есть;
-    4. иначе None — шаблонный proxy-dns не трогаем.
+    Для обычного WireGuard возвращается первый адрес из ``DNS =`` без
+    эвристик. Если DNS не задан, шаблонный ``proxy-dns`` остаётся без изменений.
+
+    Для AWG сначала используется явно заданный приватный DNS. Если его нет,
+    вычисляется шлюз первого IPv4-адреса интерфейса: Amnezia-сервер может
+    перехватывать DNS на порту 53 именно там. Публичный DNS из конфига остаётся
+    запасным вариантом, когда IPv4-адреса интерфейса нет.
     """
     cleaned = [str(item).strip() for item in (dns_values or []) if str(item).strip()]
+
+    if policy is EndpointProxyDnsPolicy.CONFIGURED:
+        return cleaned[0] if cleaned else None
 
     for item in cleaned:
         try:
