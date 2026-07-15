@@ -1,0 +1,4 @@
+interface:
+  display_name: "Zapret KVN JSON Routing"
+  short_description: "Native sing-box and Xray JSON routing"
+  default_prompt: "Use $zapret-kvn-json-routing to update native sing-box or Xray routing JSON for Zapret KVN."

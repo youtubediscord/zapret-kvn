@@ -60,6 +60,15 @@
     "rules": [
       {
         "type": "field",
+        "process": [
+          "Яндекс Музыка.exe",
+          "yandexmusic.exe"
+        ],
+        "network": "tcp,udp",
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
         "ip": [
           "geoip:private"
         ],

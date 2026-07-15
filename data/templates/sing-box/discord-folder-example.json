@@ -52,6 +52,14 @@
     ],
     "rules": [
       {
+        "process_name": [
+          "Яндекс Музыка.exe",
+          "yandexmusic.exe"
+        ],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
         "rule_set": [
           "geosite-category-ru",
           "geoip-ru"

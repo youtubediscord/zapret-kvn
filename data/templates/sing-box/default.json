@@ -43,6 +43,14 @@
         "action": "hijack-dns"
       },
       {
+        "process_name": [
+          "Яндекс Музыка.exe",
+          "yandexmusic.exe"
+        ],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
         "ip_is_private": true,
         "action": "route",
         "outbound": "direct"
