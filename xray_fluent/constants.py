@@ -27,6 +27,8 @@ def get_base_dir() -> Path:
 
 
 BASE_DIR = get_base_dir()
+ASSETS_DIR = BASE_DIR / "assets"
+APP_ICON_PATH = ASSETS_DIR / "app_icon.png"
 DATA_DIR = BASE_DIR / "data"
 TEMPLATES_DIR = DATA_DIR / "templates"
 CONFIGS_DIR = DATA_DIR / "configs"
