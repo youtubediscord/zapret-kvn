@@ -276,12 +276,14 @@ def main() -> int:
     from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
     from qfluentwidgets import SplashScreen
 
-    from xray_fluent.constants import APP_NAME
+    from xray_fluent.constants import APP_ICON_PATH, APP_NAME
     from xray_fluent.ui.main_window import MainWindow
 
     _bootstrap_logger.info("Creating QApplication")
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app_icon = QIcon(str(APP_ICON_PATH))
+    app.setWindowIcon(app_icon)
     tray_available = QSystemTrayIcon.isSystemTrayAvailable()
     app.setQuitOnLastWindowClosed(not tray_available)
 
@@ -300,7 +302,7 @@ def main() -> int:
     splash = None
     if not start_hidden:
         _bootstrap_logger.info("Showing stock splash screen")
-        splash = SplashScreen(window.windowIcon() or QIcon(":/qfluentwidgets/images/logo.png"), window)
+        splash = SplashScreen(window.windowIcon() or app_icon, window)
         sz = splash.iconSize()
         scale = max(1, window.logicalDpiX() // 96)
         splash.setIconSize(QSize(sz.width() * scale, sz.height() * scale))
