@@ -35,6 +35,7 @@ ZAPRET_DIR = ROOT / "zapret"
 DATA_TEMPLATES_DIR = ROOT / "data" / "templates"
 ASSETS_DIR = ROOT / "assets"
 APP_ICON = ASSETS_DIR / "app_icon.ico"
+TEMPLATE_UPDATE_BUNDLE_NAME = "template-update"
 
 
 def _print(msg: str) -> None:
@@ -72,6 +73,20 @@ def _copy_tree_merge(src: Path, dst: Path) -> None:
                 shutil.copy2(str(item), str(target))
             except PermissionError:
                 _print(f"  skipped (locked): {target.name}")
+
+
+def stage_template_update_bundle(
+    source_dir: Path = DATA_TEMPLATES_DIR,
+    app_dir: Path = APP_DIR,
+) -> Path:
+    """Mirror versioned native JSON templates outside preserved data/."""
+    destination = app_dir / "assets" / TEMPLATE_UPDATE_BUNDLE_NAME
+    if destination.exists():
+        shutil.rmtree(destination)
+    if source_dir.is_dir():
+        _print(f"Staging template update bundle -> {destination}")
+        _copy_tree_merge(source_dir, destination)
+    return destination
 
 
 # ------------------------------------------------------------------
@@ -173,6 +188,11 @@ def build_exe() -> None:
     if ASSETS_DIR.is_dir():
         _print(f"Merging assets -> {dst_assets}")
         _copy_tree_merge(ASSETS_DIR, dst_assets)
+
+    # app_updater.py preserves the installed data/ directory. Carry a second,
+    # generated copy outside data/ so the updated executable can safely merge
+    # shipped templates and untouched active configs on first launch.
+    stage_template_update_bundle()
 
     _print(f"Build complete: {APP_DIR / (APP_NAME + '.exe')}")
 

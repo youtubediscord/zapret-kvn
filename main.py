@@ -256,11 +256,34 @@ def _enforce_frozen() -> None:
         )
 
 
+def _sync_packaged_templates() -> None:
+    try:
+        from xray_fluent.template_sync import sync_packaged_templates
+
+        result = sync_packaged_templates()
+        if result.changed:
+            _bootstrap_logger.info(
+                "Packaged template sync complete: templates=%s configs=%s",
+                list(result.templates_updated),
+                list(result.configs_updated),
+            )
+        if result.configs_preserved:
+            _bootstrap_logger.info(
+                "Preserved user-edited active configs during template sync: %s",
+                list(result.configs_preserved),
+            )
+    except Exception:
+        # Keep the previous data/ contents as a runtime fallback and retry the
+        # packaged sync on the next launch instead of blocking the whole app.
+        _bootstrap_logger.exception("Failed to synchronize packaged templates")
+
+
 def main() -> int:
     _setup_bootstrap_logging()
     _install_exception_hooks()
     _recover_system_proxy_from_previous_run()
     _enforce_frozen()
+    _sync_packaged_templates()
     _hide_console_if_needed()
 
     parser = argparse.ArgumentParser(description="zapret kvn")

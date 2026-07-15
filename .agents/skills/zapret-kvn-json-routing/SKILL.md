@@ -26,7 +26,7 @@ Before editing or reviewing routing, read [references/native-routing.md](referen
    - edit `data/templates/<engine>/*.json` for shipped/versioned defaults;
    - inspect `data/configs/<engine>/*.json` for an existing active development copy;
    - inspect the installed application's `data/configs` for live installed behavior;
-   - never assume rebuilding overwrites an existing active config.
+   - account for startup template sync: an untouched same-path active config follows a newly packaged shipped template, while a user-edited active config is preserved.
 4. Write the rule in the engine's native schema. Do not mechanically copy keys between sing-box and Xray.
 5. Put narrow high-priority rules before broader process/domain rules and catch-all proxy rules. Preserve required sniff and DNS handling ahead of ordinary sing-box traffic rules.
 6. Update every shipped template variant when the requested behavior is a project-wide invariant.
@@ -39,8 +39,9 @@ Before editing or reviewing routing, read [references/native-routing.md](referen
 - Keep `data/templates/sing-box/*.json` and `data/templates/xray/*.json` as the versioned shipping templates.
 - Keep `data/configs/sing-box/*.json` and `data/configs/xray/*.json` as user-editable active copies used by runtime.
 - Let template selection/import/reset copy template text into the active config through `application/profile_service.py`.
-- Do not silently overwrite an existing active user config after a template-only change. Tell the user to reselect or reset the template, or update the exact active config only when that state is explicitly in scope.
-- Remember that `build.py` preserves `data/` and merges tracked templates; a build alone does not refresh an existing active copy.
+- Do not overwrite a user-edited active config after a template-only change. Automatic startup sync may refresh it only when its parsed JSON is equivalent to the previously installed same-path template.
+- Remember that the updater preserves `data/`. `build.py` therefore mirrors versioned native templates into `assets/template-update`, and `template_sync.py` merges that package into installed templates before the UI starts.
+- Treat `assets/template-update` only as update transport generated from `data/templates`; do not author routing policy there or turn it into a second template source.
 
 ## Respect mode boundaries
 

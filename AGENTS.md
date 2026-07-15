@@ -5,7 +5,7 @@
 - For sing-box and Xray proxy/native TUN modes, the active raw JSON config is the routing and DNS source of truth. Keep versioned defaults under `data/templates/sing-box` and `data/templates/xray`, using only the original native core schemas.
 - Do not introduce a custom routing DSL, overlay, `${APP_ROUTE_RULES}`-style compiler, or hidden Python injection of product routing policy. Runtime mutations must stay limited to app-owned transport and safety contracts.
 - The same active raw JSON owns routing for an engine's proxy and native TUN modes. The hybrid Xray sidecar owns only its `proxy` path, while tun2socks remains a separate legacy path.
-- Remote builds preserve existing active files under `data/configs`; changing a shipped template does not migrate an installed active config automatically. Existing installations need an explicit reset or template reselection to receive template changes.
+- The updater preserves `data/`, while remote builds carry current native templates in `assets/template-update`. On startup, `template_sync.py` replaces shipped templates and automatically refreshes a same-path active config only when it is still JSON-equivalent to the previously installed template; user-edited active JSON must remain untouched.
 - For JSON routing work, follow the project skill `$zapret-kvn-json-routing` in `.agents/skills/zapret-kvn-json-routing/SKILL.md`.
 - Keep page-level surfaces transparent. Do not add local background fills or page/root/scroll-area style sheets that block Windows 11 Mica.
 - Prefer built-in `qfluentwidgets` appearance over custom page styling. Add local UI styling only when the user explicitly asks for it or when the library cannot provide the needed result.

@@ -9,9 +9,9 @@
 | Runtime copies | `data/runtime/*.json` or manager-owned temporary files | Launch artifacts; do not author product policy here |
 | Legacy GUI routing | `RoutingSettings`, presets, `engines/xray/config_builder.py` | Separate tun2socks/legacy path, not raw sing-box/Xray modes |
 
-`application/profile_service.py` copies a selected or imported template into the corresponding active config. Reset performs the same copy. Saving in the raw editor writes the active config. Existing active configs remain unchanged when only a shipped template changes.
+`application/profile_service.py` copies a selected or imported template into the corresponding active config. Reset performs the same copy. Saving in the raw editor writes the active config.
 
-`build.py` preserves the distribution's `data/` directory and merges updated tracked templates. Therefore distinguish "template shipped" from "existing active config updated."
+The self-updater preserves the installed `data/` directory. To deliver template updates through that boundary, `build.py` generates `assets/template-update` from the versioned `data/templates` tree. Before the UI starts, `template_sync.py` compares each same-path active config with the previously installed template, refreshes the active config only when their parsed JSON is equivalent, and then installs the new shipped template. A user-edited active config remains unchanged. The generated asset is transport, not a second authoring source.
 
 ## Mode map
 
@@ -119,6 +119,7 @@ Ensure the referenced direct outbound exists, normally:
 ## Files to trace before architecture changes
 
 - `xray_fluent/application/profile_service.py`: template, active-config, reset, and save ownership.
+- `xray_fluent/template_sync.py`: updater-safe delivery of shipped templates and preservation of user-edited active JSON.
 - `xray_fluent/engines/singbox/runtime_planner.py`: proxy/TUN inbound contracts, selected outbound, bootstrap rule, and hybrid sidecar.
 - `xray_fluent/application/xray_runtime_service.py`: raw Xray metrics, TUN, selected outbound, and loop-prevention contracts.
 - `xray_fluent/ui/configs_page.py` and `ui/dashboard_page.py`: user-facing mode semantics.
@@ -134,5 +135,5 @@ Ensure the referenced direct outbound exists, normally:
 3. Run `sing-box check` for changed sing-box templates.
 4. Run `xray run -test` for changed Xray templates.
 5. Run the relevant Python suite and `git diff --check`.
-6. Report whether only templates changed or active configs were also synchronized.
+6. Test both automatic synchronization of untouched active configs and preservation of user-edited active configs.
 7. Do not claim build or installed-runtime verification unless each was actually performed.
